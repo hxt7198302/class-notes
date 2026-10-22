@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!-- v1.9 监督员联动：上课模式广播接收方的签名级权限（同 debug 签名自动授予，监督员没装时此声明无害）；
+         queries 包可见性是硬前提——Android 11+ 不声明对方包名，显式广播也发不出去（静默失败） -->
+    <uses-permission android:name="com.hxt.screenguard.permission.CLASS_LINK" />
+    <queries>
+        <package android:name="com.hxt.screenguard" />
+    </queries>
+
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+
+    <application
+        android:name=".App"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="课堂笔记·助手版"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".NoteActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".PhotoActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".CourseActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".PairActivity"
+            android:exported="false" />
+
+        <!-- stopWithTask=false：用户从最近任务划掉 APP 也不停录音服务；
+             android:process=":rec"（v1.8）：录音跑独立进程——页面进程崩溃/被杀不再连累录音，
+             反向也成立（录音进程死页面进程还在，能看笔记能马上重开录） -->
+        <service
+            android:name=".Rec"
+            android:exported="false"
+            android:process=":rec"
+            android:stopWithTask="false"
+            android:foregroundServiceType="microphone" />
+
+        <!-- 录音看门狗：进程被系统杀后由系统闹钟叫醒，发「录音中断」高优通知 -->
+        <receiver
+            android:name=".Watch"
+            android:exported="false" />
+
+        <provider
+            android:name=".PhotoProvider"
+            android:authorities="com.hxt.classnotes.photos"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+    </application>
+</manifest>

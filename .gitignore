@@ -1,0 +1,26 @@
+# 运行时生成 / 私人数据 —— 一律不进仓库
+config.json
+电脑端/api-server/api-token.txt
+电脑端/api-server/server-log.txt
+电脑端/server-out.log
+电脑端/server-err.log
+电脑端/tunnel.log
+电脑端/logs/
+电脑端/data/
+素材/
+笔记/
+课程总纲/
+备份/
+*.log
+
+# 二进制与构建产物（cloudflared 请从 Cloudflare 官方下载）
+cloudflared.exe
+安卓APP/local.properties
+安卓APP/.gradle/
+安卓APP/build/
+安卓APP/app/build/
+*.apk
+*.iml
+.idea/
+.DS_Store
+Thumbs.db

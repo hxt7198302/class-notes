@@ -1,0 +1,13 @@
+{
+  "engine": "template",
+  "whisperModel": "small",
+  "lang": "zh",
+  "listen": "0.0.0.0",
+  "maxParallel": 1,
+  "ntfyTopic": "",
+  "ai": {
+    "apiKey": "",
+    "baseUrl": "https://open.bigmodel.cn/api/paas/v4",
+    "model": "glm-4-flash"
+  }
+}

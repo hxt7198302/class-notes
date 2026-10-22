@@ -1,0 +1,48 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.hxt.classnotes'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.hxt.classnotes"
+        minSdk 26
+        targetSdk 34
+        versionCode 17
+        versionName "2.5"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    // 备份文件夹（备份\）不在编译范围，防止同包 .kt 重复声明。
+    // 2026-10-18 修：只 exclude java 对 .kt 不生效（Kotlin 走自己的 source set），
+    // 必须在 kotlin source set 上再排一次，否则备份的 .kt 会一起编译报 Redeclaration。
+    sourceSets {
+        main {
+            java {
+                exclude '**/备份/**'
+            }
+            kotlin {
+                exclude '**/备份/**'
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+}
+
+dependencies {
+}
