@@ -1,0 +1,38 @@
+# 依赖与模型
+node_modules/
+models/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 密钥与本地配置
+.env
+.env.*
+!.env.example
+api-token.txt
+session_cookies.json
+*.keystore
+
+# 运行数据
+data/
+素材/
+笔记/
+logs/
+*.log
+
+# 备份与临时
+备份/
+backup/
+_tmp_*.py
+tmp/
+*.tmp
+
+# 发布物
+dist/*.apk
+dist/*.zip
+*.apk
+
+# 系统
+.DS_Store
+Thumbs.db
+desktop.ini

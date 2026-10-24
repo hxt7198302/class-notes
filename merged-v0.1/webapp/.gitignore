@@ -1,0 +1,4 @@
+.env
+models/faster-whisper-small/
+data/sessions/
+*.log

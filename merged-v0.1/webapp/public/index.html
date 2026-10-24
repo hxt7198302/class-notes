@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f5f6fa">
+<title>课堂助手</title>
+<link rel="stylesheet" href="/app.css">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="课堂助手">
+</head>
+<body>
+<div id="boot" class="boot"><div class="boot-logo">课</div><p>加载中…</p></div>
+<div class="app">
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">课</div>
+      <div class="brand-text">
+        <h1>课堂助手</h1>
+        <p>课表 · 录音 · 笔记</p>
+      </div>
+    </div>
+    <button id="btnTheme" class="iconbtn" aria-label="切换主题" title="切换主题">◐</button>
+  </header>
+
+  <main id="main">
+    <!-- ============ 课表 ============ -->
+    <section class="view" id="view-timetable">
+      <div class="pagehead">
+        <div class="pagehead-main">
+          <h2 id="dateTitle">今天</h2>
+          <p id="dateSub" class="muted"></p>
+        </div>
+        <div class="weeknav">
+          <button id="btnPrevWeek" class="iconbtn" aria-label="上一周">‹</button>
+          <button id="weekPill" class="pill">第 1 周</button>
+          <button id="btnNextWeek" class="iconbtn" aria-label="下一周">›</button>
+          <button id="btnToday" class="pill ghost">今天</button>
+        </div>
+      </div>
+
+      <div id="nextCard" class="nextcard"></div>
+
+      <div class="gridscroll">
+        <div id="timetable" class="timetable"></div>
+      </div>
+      <p class="hint">点课程块看详情；详情里可直接开始上课录音</p>
+    </section>
+
+    <!-- ============ 课堂 ============ -->
+    <section class="view hidden" id="view-class">
+      <div id="classIdle">
+        <div class="hero">
+          <p class="hero-kicker">准备上课</p>
+          <h2 id="heroCourse">今天还有课</h2>
+          <p id="heroTime" class="muted"></p>
+          <div class="hero-actions">
+            <select id="selCourse" class="select"></select>
+            <button id="btnStartClass" class="btn primary big">开始上课</button>
+          </div>
+        </div>
+        <h3 class="section-title">今天的课</h3>
+        <div id="todayList" class="list"></div>
+      </div>
+
+      <div id="classRec" class="hidden">
+        <div class="rec-card">
+          <div class="rec-head">
+            <span class="rec-dot"></span>
+            <span class="rec-state" id="recState">正在上课</span>
+            <span id="recCourse" class="muted"></span>
+          </div>
+          <div class="rec-timer" id="recTimer">00:00</div>
+          <div class="meter" id="recMeterWrap"><div class="meter-fill" id="recMeter"></div></div>
+          <div id="recMeta" class="rec-meta">已录 0 段 · 0 张板书 · 0 个标记</div>
+          <div class="rec-actions">
+            <button id="btnPhoto" class="btn big soft">拍照板书</button>
+            <button id="btnMark" class="btn big soft">标记重点</button>
+          </div>
+          <button id="btnStopClass" class="btn danger big">结束上课</button>
+          <p class="hint" id="recHint">保持页面在前台；锁屏或切后台可能中断录音（第一版限制）</p>
+        </div>
+        <div id="recThumbs" class="thumbs"></div>
+      </div>
+    </section>
+
+    <!-- ============ 笔记 ============ -->
+    <section class="view hidden" id="view-notes">
+      <div class="pagehead">
+        <div class="pagehead-main">
+          <h2>笔记</h2>
+          <p id="notesCount" class="muted">暂无记录</p>
+        </div>
+        <button id="btnAddNoteFab" class="fab" aria-label="添加">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+      <div class="searchbox"><input id="noteSearch" type="search" placeholder="搜索课程 / 笔记 / 文字稿"></div>
+      <div class="note-entries">
+        <button id="btnOpenCourseIndex" class="btn soft tiny">📚 课程总纲</button>
+        <button id="btnOpenTodoPage" class="btn soft tiny">✅ 待办</button>
+      </div>
+      <div id="noteChips" class="chips"></div>
+      <div id="noteSelectBar" class="note-select-bar hidden">
+        <button class="btn tiny" id="btnNoteSelCancel">取消</button>
+        <span id="noteSelCount" class="note-sel-count">已选 0 项</span>
+        <button class="btn tiny" id="btnNoteSelAll">全选</button>
+        <button class="btn tiny" id="btnNoteSelInvert">反选</button>
+      </div>
+      <div id="notesList" class="list"></div>
+      <div id="noteActionBar" class="note-action-bar hidden">
+        <button class="btn primary tiny" id="btnNoteMove">移到课程夹</button>
+        <button class="btn tiny" id="btnNoteDelete" style="color:var(--danger);border-color:var(--danger)">删除</button>
+      </div>
+    </section>
+
+    <!-- ============ AI 助教 ============ -->
+    <section class="view hidden" id="view-assist">
+      <div class="pagehead">
+        <div class="pagehead-main">
+          <h2>AI 助教</h2>
+          <p id="assistSub" class="muted">总结笔记、生成导图、汇总待办、随时提问</p>
+        </div>
+      </div>
+      <div class="assist-actions">
+        <button class="assist-card" data-assist="summary"><span class="ac-ico">📝</span><b>精简笔记</b><small>把一节课压成复习卡</small></button>
+        <button class="assist-card" data-assist="mindmap"><span class="ac-ico">🧠</span><b>思维导图</b><small>生成课程知识树</small></button>
+        <button class="assist-card" data-assist="todos"><span class="ac-ico">✅</span><b>待办汇总</b><small>作业 / 截止 / 考试</small></button>
+      </div>
+      <div id="assistPanel" class="assist-panel hidden"></div>
+      <div class="chat-wrap">
+        <div class="chat-head"><span class="chat-title">对话</span><button id="btnClearChat" class="chat-clear">清空</button></div>
+        <div id="chatList" class="chat-list">
+          <div class="chat-tip" id="chatTip">我是你的课堂助手 AI 助教，可以问我：今天有什么课？这周有什么作业？帮我总结高数那节课。</div>
+        </div>
+        <div class="chat-quick">
+          <button class="chip" data-quick="今天有什么课？">今天有什么课</button>
+          <button class="chip" data-quick="这周有什么作业？">这周作业</button>
+          <button class="chip" data-quick="帮我总结一下最近一节课的重点">总结最近一节课</button>
+        </div>
+        <div class="chat-input">
+          <input id="chatInput" type="text" placeholder="问点什么…" autocomplete="off">
+          <button id="btnChatSend" class="btn primary">发送</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 我的 ============ -->
+    <section class="view hidden" id="view-me">
+      <div class="pagehead">
+        <div class="pagehead-main">
+          <h2>我的</h2>
+          <p class="muted">课表设置 · 外观 · 关于</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>学习通</h3><span class="pill" id="cxEntryState">未连接</span></div>
+        <p class="muted">扫码登录后看作业/通知/考试/任务点</p>
+        <button id="btnOpenChaoxing" class="btn primary" style="margin-top:10px">打开学习通</button>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>接口令牌</h3><span class="pill" id="appTokenState">未设置</span></div>
+        <p class="muted">后端开启 x-app-token 校验时需要；只存在本机浏览器，不会上传</p>
+        <input id="appToken" type="password" placeholder="粘贴 x-app-token（没有就留空）" autocomplete="off">
+        <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+          <button id="btnSaveToken" class="btn primary tiny">保存令牌</button>
+          <button id="btnClearToken" class="btn tiny">清除令牌</button>
+        </div>
+        <p class="muted" style="margin-top:8px">设置后原始素材的音频 / 照片会用带令牌的 fetch 取回再播放</p>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>课表管理</h3><button id="btnAddCourse" class="btn tiny">+ 添加课程</button></div>
+        <div id="courseList" class="courselist"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h3>导入课表</h3>
+          <div class="help-wrap" id="importHelpWrap">
+            <button id="btnImportHelp" class="help-btn" aria-label="导入教程" title="四种导入方式教程">?</button>
+            <div class="help-panel" id="importHelpPanel">
+              <div class="help-title">四种导入方式教程</div>
+
+              <div class="help-block">
+                <b>① 教务账号登录（推荐）</b>
+                <ol>
+                  <li>我的 → 导入课表 → 账号</li>
+                  <li>选学校系统：北物资 / 正方 / 强智</li>
+                  <li>正方、强智要填教务系统网址（浏览器打开登录页，复制地址栏）</li>
+                  <li>输入学号 + 密码（信息门户密码）</li>
+                  <li>点「登录并拉取课表」，等 5-20 秒</li>
+                  <li>核对课程列表，点「合并导入」或「替换全部」</li>
+                </ol>
+                <div class="help-warn">登录失败：密码不对或学校要验证码，改用 ③④；提示"网络访问不到"就用本机地址 http://127.0.0.1:3003</div>
+              </div>
+
+              <div class="help-block">
+                <b>② 截图识别</b>
+                <ol>
+                  <li>在教务系统课表页截图（课程名/教室/节次/周次清晰）</li>
+                  <li>导入课表 → 截图 → 点框选上传</li>
+                  <li>点「AI 识别」，等 10-30 秒</li>
+                  <li>核对（可点「改」修正），再导入</li>
+                </ol>
+                <div class="help-warn">识别漏课：截全屏或分两张识别；AI 较慢，请耐心等</div>
+              </div>
+
+              <div class="help-block">
+                <b>③ CSV / WakeUp</b>
+                <ol>
+                  <li>在 WakeUp 课程表里导入/填好课表</li>
+                  <li>WakeUp 课表页 → 右上角下载 → Excel 导入 → 导出 CSV</li>
+                  <li>课堂助手 → 导入课表 → CSV → 上传文件</li>
+                  <li>核对后导入</li>
+                </ol>
+                <div class="help-warn">表头必须含：课程名称,星期,开始节数,结束节数,老师,地点,周数（老师/地点空着填「无」）</div>
+              </div>
+
+              <div class="help-block">
+                <b>④ HTML 导入（通用）</b>
+                <ol>
+                  <li>电脑浏览器登录教务系统（扫码/密码都行）</li>
+                  <li>打开课表页，等课表完全显示</li>
+                  <li>按 Ctrl+S 保存，类型选「网页，仅 HTML」</li>
+                  <li>导入课表 → HTML → 上传保存的文件</li>
+                  <li>核对后导入</li>
+                </ol>
+                <div class="help-warn">解析不到：保存的可能是登录页或空壳页面，改用截图识别</div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <p class="muted" style="margin-bottom:10px">用教务账号自动拉取课表（推荐，更准更快），或上传截图识别</p>
+        <button id="btnOpenImport" class="btn primary">导入课表（账号 / 截图）</button>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>数据管理</h3></div>
+        <div class="row" style="display:flex;gap:8px;flex-wrap:wrap">
+          <button id="btnExportIcs" class="btn tiny primary">导出到日历（ICS）</button>
+          <button id="btnExportClasses" class="btn tiny">导出课表 JSON</button>
+          <button id="btnImportClasses" class="btn tiny">导入课表 JSON</button>
+          <button id="btnPurgeSessions" class="btn tiny" style="color:var(--danger);border-color:var(--danger)">清空课堂记录</button>
+        </div>
+        <input type="file" id="classesFile" accept="application/json,.json" class="hidden">
+        <p class="muted" style="margin-top:8px">导出的 ICS 可导入 iOS/Android/Google 日历，每节课按周次生成事件；课表 JSON 用于备份；课堂记录清空不可恢复。</p>
+      </div>
+
+      <details class="card collapsible">
+        <summary class="card-head"><h3>学期设置（导入时自动识别，一般不用改）</h3></summary>
+        <label class="field">开学第一周周一
+          <input type="date" id="weekStart">
+        </label>
+        <label class="field">学期总周数
+          <input type="number" id="weeksTotal" min="1" max="30">
+        </label>
+        <button id="btnSaveSettings" class="btn">保存设置</button>
+        <p class="muted" style="margin-top:8px">导入课表（账号/HTML）时会自动识别学期总周数；开学日期用于计算「第几周」和日历导出。</p>
+      </details>
+
+      <div class="card">
+        <div class="card-head"><h3>AI 设置（助教）</h3></div>
+        <select id="aiProvider" class="select">
+          <option value="">服务端默认（推荐）</option>
+          <option value="zhipu">智谱 GLM（自己 key）</option>
+          <option value="deepseek">DeepSeek（自己 key）</option>
+        </select>
+        <input id="aiKey" type="password" placeholder="自己的 API Key（留空用服务端默认）">
+        <input id="aiModel" type="text" placeholder="模型名（可选，如 glm-4-flash）">
+        <button id="btnSaveAi" class="btn" style="margin-top:12px">保存 AI 设置</button>
+        <p class="muted" style="margin-top:8px">Key 只存在本机浏览器，不会上传；留空则用服务端配置</p>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>转写设置</h3></div>
+        <select id="transcribeModel" class="select">
+          <option value="quality">清晰模式（small，慢一些，质量好）</option>
+          <option value="fast">快速模式（tiny，很快，质量一般）</option>
+        </select>
+        <p class="muted" style="margin-top:8px">清晰模式约 2.4 倍实时；快速模式约 30 倍实时</p>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>外观</h3></div>
+        <select id="themeSelect" class="select">
+          <option value="auto">跟随系统</option>
+          <option value="light">浅色</option>
+          <option value="dark">深色</option>
+        </select>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>关于</h3></div>
+        <p class="muted">课堂助手 v0.4 · 本地版</p>
+        <p class="muted">课表 + 上课录音 + 板书照片 + 课堂笔记。数据保存在本机 data 目录，暂无账号与云同步。</p>
+        <button id="btnCheckup" class="btn" style="margin-top:10px">环境自检</button>
+      </div>
+    </section>
+
+    <!-- ============ 学习通 ============ -->
+    <section class="view hidden" id="view-chaoxing">
+      <div class="cx-topbar">
+        <button class="cx-back" id="btnCxBack" aria-label="返回" title="返回我的">‹</button>
+        <div class="cx-top-main">
+          <h2>学习通</h2>
+          <p class="muted" id="cxSub">只读查询 · 数据来自本机 pc-agent</p>
+        </div>
+        <button class="cx-refresh" id="btnCxRefresh">刷新</button>
+      </div>
+
+      <div class="cx-status">
+        <span id="cxDot" class="cx-dot"></span>
+        <div class="cx-status-main">
+          <b id="cxStateTag" class="cx-state">未启动</b>
+          <p class="muted" id="cxStatus">检查中…</p>
+        </div>
+      </div>
+
+      <div id="cxError" class="cx-error hidden"></div>
+      <div id="cxActions" class="cx-actions"></div>
+
+      <div class="card cx-sec"><div class="card-head"><h3>📝 作业与互评</h3><span class="muted" id="cxHwCount"></span></div><div id="cxHw" class="cx-empty">—</div></div>
+      <div class="card cx-sec"><div class="card-head"><h3>🔔 老师通知</h3><span class="muted" id="cxNoticeCount"></span></div><div id="cxNotice" class="cx-empty">—</div></div>
+      <div class="card cx-sec"><div class="card-head"><h3>📅 考试安排</h3><span class="muted" id="cxExamCount"></span></div><div id="cxExam" class="cx-empty">—</div></div>
+      <div class="card cx-sec"><div class="card-head"><h3>📊 章节任务点</h3><span class="muted" id="cxProgressCount"></span></div><div id="cxProgress" class="cx-empty">—</div></div>
+
+      <p class="cx-foot">边界：只读，不签到、不刷课、不提交；登录态只存你的电脑，不上传云端。</p>
+    </section>
+
+    <!-- ============ 原始素材 ============ -->
+    <section class="view hidden" id="view-source">
+      <div class="cx-topbar">
+        <button class="cx-back" id="btnSourceBack" aria-label="返回笔记" title="返回笔记">‹</button>
+        <div class="cx-top-main">
+          <h2 id="sourceTitle">原始素材</h2>
+          <p class="muted" id="sourceSub">录音 · 文字稿 · 板书</p>
+        </div>
+        <button class="cx-refresh" id="btnSourceRefresh">刷新</button>
+      </div>
+
+      <div id="sourceError" class="cx-error hidden"></div>
+
+      <div id="sourceAudioWrap" class="src-player hidden">
+        <audio id="sourceAudio" controls preload="none"></audio>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>🎙 录音分段</h3><span class="muted" id="sourceSegCount"></span></div>
+        <div id="sourceSegments" class="src-segs"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>📝 文字稿</h3><span class="muted" id="sourceTrCount"></span></div>
+        <div id="sourceTranscript" class="src-lines"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>🖼 板书照片</h3><span class="muted" id="sourcePhotoCount"></span></div>
+        <div id="sourcePhotos" class="src-photos"></div>
+      </div>
+
+      <p class="cx-foot">文字稿点一句，会从对应录音位置播放；照片点开看原图。</p>
+    </section>
+
+    <!-- ============ 课程总纲 ============ -->
+    <section class="view hidden" id="view-course">
+      <div class="cx-topbar">
+        <button class="cx-back" id="btnCourseBack" aria-label="返回笔记" title="返回笔记">‹</button>
+        <div class="cx-top-main">
+          <h2 id="courseTitle">课程总纲</h2>
+          <p class="muted" id="courseSub">按课程汇总所有笔记</p>
+        </div>
+        <button class="cx-refresh" id="btnCourseRefresh">刷新</button>
+      </div>
+
+      <div id="courseError" class="cx-error hidden"></div>
+
+      <div id="courseStats" class="course-stats hidden">
+        <div class="course-stat"><b id="courseStatNotes">0</b><span>笔记数</span></div>
+        <div class="course-stat"><b id="courseStatPhotos">0</b><span>照片数</span></div>
+        <div class="course-stat"><b id="courseStatDur">0 分</b><span>录音时长</span></div>
+      </div>
+
+      <div id="courseListBox" class="list"></div>
+      <p class="cx-foot" id="courseFoot">课程总纲由笔记聚合而成，点条目进入笔记详情。</p>
+    </section>
+
+    <!-- ============ 待办 ============ -->
+    <section class="view hidden" id="view-todo">
+      <div class="cx-topbar">
+        <button class="cx-back" id="btnTodoBack" aria-label="返回笔记" title="返回笔记">‹</button>
+        <div class="cx-top-main">
+          <h2>待办</h2>
+          <p class="muted" id="todoSub">从笔记里汇总的作业与截止</p>
+        </div>
+        <button class="cx-refresh" id="btnTodoRefresh">刷新</button>
+      </div>
+
+      <div id="todoError" class="cx-error hidden"></div>
+
+      <div class="card">
+        <div class="card-head"><h3>✅ 待办清单</h3><span class="muted" id="todoCount"></span></div>
+        <div id="todoListBox" class="todo-list"></div>
+      </div>
+
+      <p class="cx-foot">勾选状态只保存在本机浏览器（kb-todo-done），不会改动原始笔记。</p>
+    </section>
+  </main>
+
+  <nav class="tabbar">
+    <button class="tab active" data-view="timetable">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="17" rx="3"/><path d="M3 9h18M8 2v4M16 2v4"/></svg>
+      <span>课表</span>
+    </button>
+    <button class="tab" data-view="class">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>
+      <span>课堂</span>
+    </button>
+    <button class="tab" data-view="notes">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h11l3 3v13H5z"/><path d="M8 10h8M8 14h8M8 18h5"/></svg>
+      <span>笔记</span>
+    </button>
+    <button class="tab" data-view="assist">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l2.2 4.6L19 9l-3.5 3.3.9 4.7-4.4-2.3-4.4 2.3.9-4.7L5 9l4.8-1.4z"/></svg>
+      <span>助教</span>
+    </button>
+    <button class="tab" data-view="me">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5 20c1.2-3.5 3.8-5 7-5s5.8 1.5 7 5"/></svg>
+      <span>我的</span>
+    </button>
+  </nav>
+</div>
+
+<div class="sheet-mask hidden" id="sheetMask"></div>
+<div class="sheet hidden" id="sheet">
+  <div class="sheet-handle"></div>
+  <div id="sheetBody" class="sheet-scroll"></div>
+</div>
+
+<div class="modal-mask hidden" id="finishMask"></div>
+<div class="modal hidden" id="finishModal">
+  <h3>这节课结束了</h3>
+  <p id="finishMeta" class="muted"></p>
+  <label class="field">课堂笔记（可选）
+    <textarea id="finishNote" rows="5" placeholder="记点什么：重点、作业、没听懂的地方…"></textarea>
+  </label>
+  <div class="modal-actions">
+    <button id="btnFinishSave" class="btn primary">保存笔记</button>
+  </div>
+</div>
+
+<input type="file" id="photoInput" accept="image/*" capture="environment" class="hidden">
+
+<div id="toast" class="toast hidden"></div>
+<script src="/app.js"></script>
+</body>
+</html>

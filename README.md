@@ -1,3 +1,5 @@
+> 📦 **合并版 v0.1（2026-10-24）**：与 Web 版合并后的公开脱敏快照在 [`merged-v0.1/`](merged-v0.1/)，含统一 Web UI、云端后端、电脑端能力模块与安卓 WebView 壳。说明见 [merged-v0.1/README.md](merged-v0.1/README.md)。
+
 # 课堂笔记 ClassNotes
 
 > 上课只管录音、拍板书；下课回家，电脑自动把课变成能复看的笔记。

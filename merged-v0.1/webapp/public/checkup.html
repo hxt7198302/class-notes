@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课堂助手 · 环境自检</title>
+<style>
+  :root { --bg:#f4f6fb; --card:#fff; --ink:#1b2233; --dim:#7c869c; --line:#e7ebf3; --ok:#0f9d6e; --bad:#e5484d; --brand:#3b6ef6; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",system-ui,sans-serif; font-size:15px; }
+  .wrap { max-width:640px; margin:0 auto; padding:24px 16px 60px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .sub { color:var(--dim); font-size:13px; margin-bottom:18px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:16px; margin-bottom:14px; box-shadow:0 8px 24px rgba(24,39,75,.06); }
+  .card h2 { font-size:15px; margin:0 0 10px; color:var(--dim); }
+  .item { display:flex; align-items:flex-start; gap:10px; padding:8px 0; border-bottom:1px dashed var(--line); font-size:13.5px; }
+  .item:last-child { border-bottom:none; }
+  .icon { flex:none; width:20px; text-align:center; font-weight:700; }
+  .ok { color:var(--ok); }
+  .bad { color:var(--bad); }
+  .name { flex:1; }
+  .detail { color:var(--dim); font-size:12px; margin-top:2px; word-break:break-all; }
+  .summary { border-radius:16px; padding:14px 16px; font-weight:600; }
+  .summary.good { background:#e8f7ef; color:#0b6b4c; }
+  .summary.bad { background:#fdeaea; color:#a32327; }
+  .tips { color:var(--dim); font-size:12.5px; line-height:1.8; margin-top:16px; }
+  .btn { display:inline-block; margin-top:8px; padding:8px 14px; border-radius:10px; background:var(--brand); color:#fff; text-decoration:none; font-size:13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>环境自检</h1>
+  <p class="sub">检查这台设备能不能正常用课堂助手（课表 / 录音 / 转写 / 导入）</p>
+  <div id="summary" class="summary good">检查中…</div>
+  <div class="card"><h2>服务端（电脑）</h2><div id="serverList"></div></div>
+  <div class="card"><h2>浏览器（当前设备）</h2><div id="browserList"></div></div>
+  <div class="tips">
+    <p>说明：</p>
+    <p>· 录音需要「安全上下文」：电脑用 localhost、手机用 HTTPS 隧道地址才能拿到麦克风。</p>
+    <p>· 转写依赖本机 Python 3.12 + faster-whisper 模型；AI 课表识别依赖 .env 里的 DEEPSEEK_API_KEY。</p>
+    <p>· 有 ❌ 项不影响课表浏览；录音/转写/导入会受影响。</p>
+    <a class="btn" href="/">返回课堂助手</a>
+  </div>
+</div>
+<script>
+function row(name, ok, detail) {
+  var div = document.createElement('div');
+  div.className = 'item';
+  div.innerHTML = '<span class="icon ' + (ok ? 'ok' : 'bad') + '">' + (ok ? '✓' : '✗') + '</span>' +
+    '<div class="name">' + name + (detail ? '<div class="detail">' + detail + '</div>' : '') + '</div>';
+  return div;
+}
+var all = [];
+function addTo(containerId, name, ok, detail) {
+  document.getElementById(containerId).appendChild(row(name, ok, detail));
+  all.push({ ok: ok });
+}
+fetch('/api/system-check').then(function (r) { return r.json(); }).then(function (j) {
+  (j.checks || []).forEach(function (c) { addTo('serverList', c.name, c.ok, c.detail); });
+  addTo('serverList', 'Node 版本', !!j.node, j.node || '');
+  finish();
+}).catch(function (e) {
+  addTo('serverList', '服务端检查', false, '接口不可用：' + e.message);
+  finish();
+});
+var secure = window.isSecureContext;
+var mediaOk = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+var recOk = typeof window.MediaRecorder !== 'undefined';
+addTo('browserList', '安全上下文', secure, secure ? '是（localhost / HTTPS）' : '否：手机 http 打开时麦克风会被禁用');
+addTo('browserList', '录音 API（MediaRecorder）', recOk, recOk ? '可用' : '不可用');
+addTo('browserList', '麦克风接口', mediaOk, mediaOk ? '可用（首次录音会请求权限）' : '不可用');
+addTo('browserList', '屏幕常亮（WakeLock）', 'wakeLock' in navigator, 'wakeLock' in navigator ? '支持' : '不支持（锁屏可能中断录音）');
+addTo('browserList', '本地存储', (function () { try { localStorage.setItem('__t', '1'); localStorage.removeItem('__t'); return true; } catch (e) { return false; } })(), '保存主题/转写偏好');
+if (navigator.permissions && navigator.permissions.query) {
+  navigator.permissions.query({ name: 'microphone' }).then(function (p) {
+    addTo('browserList', '麦克风权限状态', p.state !== 'denied', p.state);
+    finish();
+  }).catch(function () { finish(); });
+} else { finish(); }
+function finish() {
+  if (all.length < 10) return;
+  var bad = all.filter(function (x) { return !x.ok; }).length;
+  var s = document.getElementById('summary');
+  if (bad === 0) { s.className = 'summary good'; s.textContent = '全部通过：这台设备可以正常使用课堂助手。'; }
+  else if (bad <= 2) { s.className = 'summary bad'; s.textContent = '有 ' + bad + ' 项需要注意（见下方红项），核心功能可能受影响。'; }
+  else { s.className = 'summary bad'; s.textContent = '有 ' + bad + ' 项未通过，请按下方提示处理。'; }
+}
+</script>
+</body>
+</html>
