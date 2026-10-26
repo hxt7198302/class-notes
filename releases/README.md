@@ -2,8 +2,8 @@
 
 APK 不放仓库里（二进制不进 git，`.gitignore` 里有 `*.apk`），发布时挂到 GitHub Releases：
 
-- 文件：`课堂笔记-v2.13.apk`
-- 校验：同时上传 `课堂笔记-v2.13.apk.sha256`，装之前可自行核对
+- 文件：`classnotes-v2.13.apk`
+- 校验：同时上传 `classnotes-v2.13.apk.sha256`，装之前可自行核对（文件名用纯 ASCII，避免中文在 URL 里被编码出错）
 - 说明：从**本仓库源码**（`安卓APP/`，versionCode 26）用 `clean assembleDebug` 构建的公开版，**不内置任何配对口令**；首次使用需在 APP 里与自己的电脑配对（手机和电脑连同一个 WiFi → APP「连接电脑」→「自动找我的电脑」）
 
 ## v2.13（2026-10-26）
@@ -20,8 +20,8 @@ APK 不放仓库里（二进制不进 git，`.gitignore` 里有 `*.apk`），发
 校验命令：
 
 ```bash
-sha256sum 课堂笔记-v2.13.apk
-# Windows PowerShell：Get-FileHash .\课堂笔记-v2.13.apk -Algorithm SHA256
+sha256sum classnotes-v2.13.apk
+# Windows PowerShell：Get-FileHash .\classnotes-v2.13.apk -Algorithm SHA256
 ```
 
 ## 本次改动

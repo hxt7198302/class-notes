@@ -43,7 +43,7 @@ ACC 2026 黑客松 · 赛道一（AI + 学习）· 队伍「阿泰与朝瑞」
 把 [cloudflared.exe](https://github.com/cloudflare/cloudflared/releases) 放到本目录，双击「启动电脑端.bat」。
 首次会自动装转写引擎（几分钟，只装这一次）。
 
-**2. 手机**：装 [`课堂笔记-v2.13.apk`](https://github.com/hxt7198302/class-notes/releases/download/v2.13/课堂笔记-v2.13.apk)（约 1.1 MB，Android 8.0 及以上；sha256 见 [releases/README.md](releases/README.md)）。也可以自己从 [`安卓APP/`](安卓APP/) 构建，步骤见下。
+**2. 手机**：装 [`classnotes-v2.13.apk`](https://github.com/hxt7198302/class-notes/releases/download/v2.13/classnotes-v2.13.apk)（约 1.1 MB，Android 8.0 及以上；sha256 见 [releases/README.md](releases/README.md)）。也可以自己从 [`安卓APP/`](安卓APP/) 构建，步骤见下。
 
 **3. 连接**（只做一次）：手机连**和电脑同一个 WiFi** → APP 点「🔗 第一次使用？点这里连接电脑」→「🔍 自动找我的电脑」。
 （首次配对必须同一局域网：配对信息走 UDP 局域网发现。配好之后人在外面也能用隧道连回家。）
@@ -95,7 +95,7 @@ gradle clean assembleDebug        # 发版必须 clean：增量构建出过 clas
 # 产物：安卓APP/app/build/outputs/apk/debug/app-debug.apk（用 Android 默认 debug 签名）
 ```
 
-安装包与源码的对应关系：Releases 里的 `课堂笔记-v2.13.apk` 就是**这份源码**用 `clean assembleDebug` 构建的产物，versionCode 26，签名是 Android 默认 debug 证书（`981cde98…e6794`）。想自己签名就在 `app/build.gradle` 加 `signingConfigs`，换你自己的 key。
+安装包与源码的对应关系：Releases 里的 `classnotes-v2.13.apk` 就是**这份源码**用 `clean assembleDebug` 构建的产物，versionCode 26，签名是 Android 默认 debug 证书（`981cde98…e6794`）。想自己签名就在 `app/build.gradle` 加 `signingConfigs`，换你自己的 key。
 
 > v2.13 相对 2.12 只改了一处代码（`Api.connect()`）：开源版默认 token 是占位符，原来「先探活再保存凭证」会让空白安装永远配不上（拿占位 token 打 `/api/ping` 吃 401）。现在先把配对下发的 token 装进内存再探活，探通才落库。
 
