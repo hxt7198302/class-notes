@@ -87,6 +87,9 @@ def main():
     ap.add_argument("--outdir", required=True)
     ap.add_argument("--model", default="large-v3")
     ap.add_argument("--lang", default="zh")
+    # v2.8 课程术语热词（空格分隔）。只在当前段解码时参与，不改 initial_prompt——
+    # 用 prompt 前缀会导致模型把提示词当上一句"接着往下念"（回声 bug），hotwords 不会。
+    ap.add_argument("--hotwords", default="")
     args = ap.parse_args()
 
     os.makedirs(args.outdir, exist_ok=True)
@@ -117,14 +120,26 @@ def main():
         engine = f"cpu/int8/{cpu_model}"
     print(f"[transcribe] 引擎：{engine}", flush=True)
 
-    segments, info = model.transcribe(
-        args.input,
+    tkw = dict(
         language=args.lang if args.lang != "auto" else None,
         vad_filter=True,
         vad_parameters={"min_silence_duration_ms": 700},
         beam_size=5,
         condition_on_previous_text=False,
     )
+    hotwords = (args.hotwords or "").strip()
+    if hotwords:
+        # 老版本 faster-whisper 没有 hotwords 参数：静默退回纯转写，绝不因热词整段失败
+        try:
+            import inspect
+            if "hotwords" in inspect.signature(model.transcribe).parameters:
+                tkw["hotwords"] = hotwords
+                print(f"[transcribe] 术语热词：{hotwords}", flush=True)
+            else:
+                print("[transcribe] 当前 faster-whisper 不支持 hotwords，已跳过", flush=True)
+        except Exception as e:
+            print(f"[transcribe] 热词探测失败，已跳过：{e}", flush=True)
+    segments, info = model.transcribe(args.input, **tkw)
 
     rows, txt_lines = [], []
     last_flush = 0
@@ -162,6 +177,7 @@ def main():
         "tookSec": round(dur, 1),
         "language": info.language,
         "engine": engine,
+        "hotwords": hotwords,
     }
     write_status(args.outdir, summary)
     with open(os.path.join(args.outdir, "transcribe.done"), "w", encoding="utf-8") as fh:

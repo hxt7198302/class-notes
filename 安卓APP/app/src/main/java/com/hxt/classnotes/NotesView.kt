@@ -570,6 +570,31 @@ class NotesView(private val act: Activity) : LinearLayout(act) {
         hint.setPadding(0, Ui.dp(6), 0, 0)
         card.addView(hint)
 
+        // 2026-10-24 由测试版并入生产：单节/整组重传并验证
+        // 面板会显示实发字节、速度、分块 MD5、整文件 MD5
+        val hasUploaded = g.items.any { it.optString("state") == "uploaded" }
+        val busy = g.recording || g.uploading || TestReupload.isRunning()
+        val label = when {
+            g.recording -> "录音中不可重传"
+            g.uploading || TestReupload.isRunning() -> "重传中…"
+            hasUploaded -> "重传并验证"
+            else -> "上传并验证"
+        }
+        val testBtn = Ui.button(act, label, hasUploaded)
+        testBtn.textSize = Ui.sp(12)
+        testBtn.isEnabled = !busy
+        if (busy) testBtn.alpha = 0.55f
+        val btnLp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        btnLp.topMargin = Ui.dp(9)
+        testBtn.setOnClickListener {
+            if (TestReupload.isRunning()) { Ui.toast(act, "已有重传任务在跑，等它结束"); return@setOnClickListener }
+            TestReuploadUi.open(act, g.course, g.dayIso, g.items) {
+                refresh()
+                onRequestSync?.invoke()
+            }
+        }
+        card.addView(testBtn, btnLp)
+
         card.setOnClickListener { onGroupTap(g) }
         card.setOnLongClickListener { onGroupLongPress(g); true }
         return card

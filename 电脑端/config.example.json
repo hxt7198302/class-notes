@@ -1,0 +1,11 @@
+{
+  "listen": "0.0.0.0",
+  "engine": "template",
+  "maxParallel": 2,
+  "whisperModel": "large-v3",
+  "lang": "zh",
+  "pythonCmd": "python",
+  "ntfyTopic": "your-ntfy-topic",
+  "phonePushScript": "",
+  "deadlinesFile": ""
+}

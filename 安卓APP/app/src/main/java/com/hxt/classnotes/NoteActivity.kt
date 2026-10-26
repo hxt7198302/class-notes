@@ -40,6 +40,8 @@ class NoteActivity : Activity() {
     private var barTitle: TextView? = null
     private var tocBtn: TextView? = null
     private var keysBtn: TextView? = null
+    private var srcBtn: TextView? = null
+    private var shareBtn: TextView? = null
     private var wv: WebView? = null
     private var appliedTheme = ""
 
@@ -117,7 +119,89 @@ class NoteActivity : Activity() {
         keysBtn?.setOnClickListener { showKeys() }
         keysBtn?.visibility = View.GONE
         bar.addView(keysBtn)
+
+        // v2.6：原始素材（录音原文 / 照片 / 录音）。始终可见——笔记没做完时更要用。
+        srcBtn = pill("🎧")
+        srcBtn?.setOnClickListener { openSource(1) }
+        bar.addView(srcBtn)
+
+        // v2.8：导出/分享（复制 Markdown / 分享 .md / 打包 md+图片 zip）
+        shareBtn = pill("↗")
+        shareBtn?.setOnClickListener { showShare() }
+        bar.addView(shareBtn)
         return bar
+    }
+
+    // ---------- v2.8 导出/分享 ----------
+    private fun noteTitle(): String {
+        val c = Db.noteCache(sid)
+        val t = c?.optString("title") ?: ""
+        return t.ifEmpty { c?.optString("course") ?: "" }.ifEmpty { "课堂笔记" }
+    }
+
+    private fun showShare() {
+        if (Export.markdown(this, sid) == null) {
+            // 老缓存没有 Markdown（v2.7 以前只存 html）：连电脑补一次再弹
+            Ui.toast(this, "这份笔记还没同步 Markdown，正在从电脑补…")
+            Thread {
+                val base = try { Api.workingUrl() } catch (_: Exception) { null }
+                if (base != null) try { Api.refreshNote(this, base, sid) } catch (_: Exception) { }
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    if (Export.markdown(this, sid) == null) Ui.toast(this, "补不到 Markdown：先连上电脑同步一次，或在电脑上看")
+                    else showShare()
+                }
+            }.start()
+            return
+        }
+        val items = arrayOf(
+            "📋 复制 Markdown 文本",
+            "📄 分享 Markdown 文件",
+            "🗂 分享 Markdown + 图片（zip，推荐发微信）"
+        )
+        AlertDialog.Builder(this)
+            .setTitle("分享「${noteTitle().take(16)}」")
+            .setItems(items) { _, which ->
+                val md = Export.markdown(this, sid) ?: return@setItems
+                when (which) {
+                    0 -> Export.shareText(this, md)
+                    1 -> shareBuilt { Export.buildMdFile(this, sid, noteTitle()) }
+                    else -> shareBuilt { Export.buildZip(this, sid, noteTitle()) }
+                }
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /** 后台生成文件再调系统分享面板；图片缺失时先尝试从电脑补 */
+    private fun shareBuilt(build: () -> File?) {
+        Ui.toast(this, "正在生成…")
+        Thread {
+            if (!hasAllImages()) {
+                val base = try { Api.workingUrl() } catch (_: Exception) { null }
+                if (base != null) try { Api.refreshNote(this, base, sid) } catch (_: Exception) { }
+            }
+            val f = try { build() } catch (_: Exception) { null }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (f == null) {
+                    Ui.toast(this, "生成失败：这份笔记还没有 Markdown 缓存，先同步一次")
+                    return@runOnUiThread
+                }
+                val mime = if (f.name.endsWith(".zip")) "application/zip" else "text/plain"
+                Export.share(this, f, mime, noteTitle())
+            }
+        }.start()
+    }
+
+    /** 笔记里引用的图片是否都在手机缓存里 */
+    private fun hasAllImages(): Boolean {
+        val md = Export.markdown(this, sid) ?: return true
+        val dir = File(File(filesDir, "notes"), sid)
+        return Regex("!\\[[^\\]]*\\]\\(([^)\\s]+)\\)").findAll(md)
+            .map { it.groupValues[1] }
+            .filter { !it.startsWith("http") && !it.startsWith("assets/") && !it.contains('/') }
+            .all { File(dir, it).exists() }
     }
 
     private fun pill(label: String): TextView {
@@ -275,9 +359,77 @@ class NoteActivity : Activity() {
         card.addView(refresh)
         box.addView(card)
 
+        // v2.6：笔记还没生成时，也能听录音、看原文、看已拍的照片
+        val srcCard = buildSourceCard(cache)
+        box.addView(srcCard, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ).also { it.topMargin = Ui.dp(10) })
+
         val hint = Ui.text(this, "提示：正文样式在「设置 → 显示 → 笔记正文」里切换；图片点一下可全屏放大。", 11, Ui.TEXT_SUB)
         hint.setPadding(Ui.dp(6), Ui.dp(12), Ui.dp(6), 0)
         box.addView(hint)
+    }
+
+    // ---------- 原始素材入口（v2.6） ----------
+    private fun openSource(tab: Int) {
+        val cache = Db.noteCache(sid)
+        val s = Db.session(sid)
+        val c = cache?.optString("course")?.takeIf { it.isNotEmpty() }
+            ?: s?.optString("course") ?: ""
+        val at = s?.optLong("startedAt") ?: 0L
+        SourceActivity.open(this, sid, c, at, tab)
+    }
+
+    private fun buildSourceCard(cache: JSONObject?): LinearLayout {
+        val card = Ui.card(this)
+        val at = Db.session(sid)?.optLong("startedAt") ?: 0L
+        val c = cache?.optString("course")?.takeIf { it.isNotEmpty() }
+            ?: (Db.session(sid)?.optString("course") ?: "")
+        val counts = SourceActivity.localCounts(sid, c, at)
+        val cachedSrc = Api.cachedSource(this, sid)
+        val cueCnt = cachedSrc?.optJSONArray("transcript")?.length() ?: 0
+
+        val head = LinearLayout(this)
+        head.orientation = LinearLayout.HORIZONTAL
+        head.gravity = Gravity.CENTER_VERTICAL
+        head.addView(Ui.text(this, "原始素材", 16, Ui.TEXT, true),
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val tip = Ui.text(this, "不用等笔记", 11, Ui.TEXT_SUB)
+        head.addView(tip)
+        card.addView(head)
+
+        val rows = LinearLayout(this)
+        rows.orientation = LinearLayout.VERTICAL
+        rows.setPadding(0, Ui.dp(8), 0, 0)
+        rows.addView(sourceRow("🎧", "听录音",
+            if (counts[0] > 0) "${counts[0]} 段 · 本机可听" else "点开查看", 0))
+        rows.addView(sourceRow("📄", "看原文",
+            if (cueCnt > 0) "已转 $cueCnt 句 · 点开接着看" else "电脑转写后自动出现", 1))
+        rows.addView(sourceRow("📷", "看照片",
+            if (counts[1] > 0) "你拍了 ${counts[1]} 张 · 拍完就能看" else "点开查看", 2))
+        card.addView(rows)
+        return card
+    }
+
+    private fun sourceRow(icon: String, title: String, sub: String, tab: Int): LinearLayout {
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.gravity = Gravity.CENTER_VERTICAL
+        row.setPadding(Ui.dp(6), Ui.dp(10), Ui.dp(6), Ui.dp(10))
+        val em = Ui.text(this, icon, 19, Ui.TEXT)
+        em.setPadding(0, 0, Ui.dp(10), 0)
+        row.addView(em)
+        val mid = LinearLayout(this)
+        mid.orientation = LinearLayout.VERTICAL
+        mid.addView(Ui.text(this, title, 14, Ui.TEXT, true))
+        val s = Ui.text(this, sub, 11, Ui.TEXT_SUB)
+        s.setPadding(0, Ui.dp(2), 0, 0)
+        mid.addView(s)
+        row.addView(mid, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        row.addView(Ui.text(this, "›", 22, Ui.TEXT_SUB))
+        row.setOnClickListener { openSource(tab) }
+        Ui.pressable(row, 0.97f)
+        return row
     }
 
     // ---------- HTML 处理 ----------
@@ -384,7 +536,18 @@ class NoteActivity : Activity() {
         }
 
         val css = """
-            :root { color-scheme: ${if (dark) "dark" else "light"}; }
+            /* v2.6 理科推导步骤卡（md2html 输出的 .cn-derive）取色：跟随 UiTheme，深色自动适配 */
+            :root {
+              color-scheme: ${if (dark) "dark" else "light"};
+              --cn-panel: $cardFill;
+              --cn-badge-bg: $card;
+              --cn-line: $line;
+              --cn-note-line: $line;
+              --cn-ink: $text;
+              --cn-sub: $sub;
+              --cn-accent: $primary;
+              --cn-result: $primary;
+            }
             * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
             html { background: transparent; }
             body {

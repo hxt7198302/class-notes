@@ -30,7 +30,13 @@ if (-not $py) {
 }
 
 # ---------- 3) 首次生成配置（随机 ntfy 频道=你的私有频道，别外传） ----------
-$cfgFile = Join-Path $base 'config.json'
+# 注意：服务端读的是 电脑端\config.json（见 api-server/server.mjs 的 MAIN_CFG_FILE），
+# 不是仓库根目录。v2.0 的启动脚本曾写错位置，导致生成出来的 ntfyTopic 服务端根本没读到
+# （引擎仍是默认 template 所以看着能跑，但公网隧道地址不会广播给手机）。v2.13 修正。
+$cfgFile = Join-Path $base '电脑端\config.json'
+# 兼容旧版脚本已经在根目录生成的 config.json：搬过去，别让人白配一次
+$legacyCfg = Join-Path $base 'config.json'
+if ((-not (Test-Path $cfgFile)) -and (Test-Path $legacyCfg)) { Copy-Item $legacyCfg $cfgFile }
 if (-not (Test-Path $cfgFile)) {
   $topic = 'classnotes-' + (-join ((97..122) + (48..57) | Get-Random -Count 12 | ForEach-Object { [char]$_ }))
   $cfg = @{ engine='template'; whisperModel='small'; lang='zh'; listen='0.0.0.0'; ntfyTopic=$topic } | ConvertTo-Json

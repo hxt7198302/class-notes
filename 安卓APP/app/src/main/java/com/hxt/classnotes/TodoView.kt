@@ -78,6 +78,9 @@ class TodoView(private val act: Activity) : LinearLayout(act) {
         head.addView(Ui.text(act, "作业、截止日期、课程都在这里；点 ☐ 勾掉，勾一下就消失", 12, Ui.TEXT_SUB))
         addView(head)
 
+        // v2.11 学习通入口：底栏「待办」页顶部（CourseActivity 顶层也留了一份，两条路都能进）
+        addView(chaoxingCard())
+
         val list = agg?.optJSONArray("list")
         if (list == null) {
             addView(Ui.text(act, "待办和总纲要连上家里电脑才能看（素材和笔记不会丢）。连上 WiFi 打开 APP 会自动重试。",
@@ -129,6 +132,33 @@ class TodoView(private val act: Activity) : LinearLayout(act) {
             if (rec == null || !rec.optBoolean("done")) n++
         }
         return n
+    }
+
+    /** v2.11 学习通入口卡：有本地缓存就显示上次的计数（不发网络请求，秒开） */
+    private fun chaoxingCard(): View {
+        val card = Ui.card(act)
+        val row = LinearLayout(act)
+        row.orientation = LinearLayout.HORIZONTAL
+        val col = LinearLayout(act)
+        col.orientation = LinearLayout.VERTICAL
+        col.addView(Ui.text(act, "📖 学习通", 15, Ui.TEXT, true))
+        var sub = "扫码登录后看作业 / 通知 / 考试 / 章节进度"
+        try {
+            val f = File(act.filesDir, "chaoxing-cache.json")
+            if (f.exists() && f.length() > 0) {
+                val s = JSONObject(f.readText(Charsets.UTF_8))
+                    .optJSONObject("data")?.optJSONObject("summary")
+                if (s != null) {
+                    sub = "未交 ${s.optInt("pending")} · 待互评 ${s.optInt("peer")} · 未读通知 ${s.optInt("unread")}"
+                }
+            }
+        } catch (_: Exception) { }
+        col.addView(Ui.text(act, sub, 12, Ui.TEXT_SUB))
+        row.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        row.addView(Ui.text(act, "›", 22, Ui.PRIMARY))
+        card.addView(row)
+        card.setOnClickListener { act.startActivity(Intent(act, ChaoxingActivity::class.java)) }
+        return card
     }
 
     private fun courseRow(course: String, sub: String): View {

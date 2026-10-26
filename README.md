@@ -1,4 +1,6 @@
-> 📦 **合并版 v0.1（2026-10-24）**：与 Web 版合并后的公开脱敏快照在 [`merged-v0.1/`](merged-v0.1/)，含统一 Web UI、云端后端、电脑端能力模块与安卓 WebView 壳。说明见 [merged-v0.1/README.md](merged-v0.1/README.md)。
+> 🚀 **v2.13（2026-10-26）**：作者日常在用的那一套「手机原生 APP + 自己电脑上的分析端」已完整开源——[`安卓APP/`](安卓APP/) 是原生 Kotlin 手机端源码，[`电脑端/`](电脑端/) 是电脑端现役代码，安装包挂在 [Releases](https://github.com/hxt7198302/class-notes/releases/latest)。看这一份就能跑起来。
+
+> 📦 **合并版 v0.1（2026-10-24）**：与 Web 版合并后的公开脱敏快照在 [`merged-v0.1/`](merged-v0.1/)，含统一 Web UI、云端后端、电脑端能力模块与安卓 WebView 壳（这是另一条产品线，不是作者日常在用的手机原生 APP）。说明见 [merged-v0.1/README.md](merged-v0.1/README.md)。
 
 # 课堂笔记 ClassNotes
 
@@ -41,9 +43,10 @@ ACC 2026 黑客松 · 赛道一（AI + 学习）· 队伍「阿泰与朝瑞」
 把 [cloudflared.exe](https://github.com/cloudflare/cloudflared/releases) 放到本目录，双击「启动电脑端.bat」。
 首次会自动装转写引擎（几分钟，只装这一次）。
 
-**2. 手机**：安装 `releases` 里的 APK（或自行用 Android Studio 构建，见下）。
+**2. 手机**：装 [`课堂笔记-v2.13.apk`](https://github.com/hxt7198302/class-notes/releases/download/v2.13/课堂笔记-v2.13.apk)（约 1.1 MB，Android 8.0 及以上；sha256 见 [releases/README.md](releases/README.md)）。也可以自己从 [`安卓APP/`](安卓APP/) 构建，步骤见下。
 
 **3. 连接**（只做一次）：手机连**和电脑同一个 WiFi** → APP 点「🔗 第一次使用？点这里连接电脑」→「🔍 自动找我的电脑」。
+（首次配对必须同一局域网：配对信息走 UDP 局域网发现。配好之后人在外面也能用隧道连回家。）
 
 之后上课：点「开始上课」→ 要拍板书就拍照 → 下课点「下课」。回家笔记自动出现在 APP 里。
 
@@ -85,20 +88,29 @@ AI 模式默认用智谱 `glm-4-flash`（免费额度，不扣费）。也支持
 
 ```bash
 cd 安卓APP
-# 需要 Android SDK 34 + JDK 17 + Gradle 8.x（仓库未带 wrapper）
-# 并在 安卓APP/local.properties 里写一行：sdk.dir=你的Android SDK路径
-gradle assembleDebug
+# 需要 Android SDK Platform 34 + Build-Tools 34 + JDK 17 + Gradle 8.x（仓库未带 wrapper）
+# 在 安卓APP/local.properties 里写一行：sdk.dir=你的 Android SDK 路径
+# Windows 下用 Y:\sdk 这种盘符也可以；工程已开 android.overridePathCheck，中文路径能构建
+gradle clean assembleDebug        # 发版必须 clean：增量构建出过 classes3.dex 膨胀的异常包
+# 产物：安卓APP/app/build/outputs/apk/debug/app-debug.apk（用 Android 默认 debug 签名）
 ```
+
+安装包与源码的对应关系：Releases 里的 `课堂笔记-v2.13.apk` 就是**这份源码**用 `clean assembleDebug` 构建的产物，versionCode 26，签名是 Android 默认 debug 证书（`981cde98…e6794`）。想自己签名就在 `app/build.gradle` 加 `signingConfigs`，换你自己的 key。
+
+> v2.13 相对 2.12 只改了一处代码（`Api.connect()`）：开源版默认 token 是占位符，原来「先探活再保存凭证」会让空白安装永远配不上（拿占位 token 打 `/api/ping` 吃 401）。现在先把配对下发的 token 装进内存再探活，探通才落库。
 
 **电脑端**：
 
 ```bash
-npm install -g  # 不需要：电脑端是零依赖 Node 脚本
-python -m pip install -r requirements.txt   # faster-whisper
+# 零依赖：不需要 npm install
+python -m pip install -r requirements.txt   # faster-whisper（首次会自动下模型）
+copy 电脑端\config.example.json 电脑端\config.json   # 默认 engine=template：不填任何 AI Key 也能出转写稿笔记
 node 电脑端/api-server/server.mjs
 ```
 
-首次运行会在 `电脑端/` 下生成 `config.json` 与 `api-token.txt`（都在 `.gitignore` 里）。
+首次运行会在 `电脑端/` 下生成 `config.json` 与 `电脑端/api-server/api-token.txt`（都在 `.gitignore` 里）。
+**别省掉复制配置那一步**：没有 `电脑端/config.json` 时服务端默认只监听 `127.0.0.1`，手机连不上（示例配置里是 `0.0.0.0`，并带局域网 UDP 发现）。
+`engine` 可选项：`template`（默认，无 AI，零费用）/ `glm`（在 APP 里填免费 API Key 后自动切）/ `zcode`（作者私有的无头会话引擎，公开版用不到）。
 
 ## 路线图：把「记下来」升级成「讲懂你」
 

@@ -1,0 +1,12 @@
+{
+  "versionCode": 26,
+  "versionName": "2.13",
+  "minSdk": 26,
+  "size": 1105685,
+  "notes": "开源发布版：修复空白安装首次配对（Api.connect 先装配对 token 再探活）；源码与 APK 一致。",
+  "apk": "课堂笔记-v2.13.apk",
+  "sha256": "8b3f2f42fc21ede504d873f74ad06b28cd11e85a31f8b052dc61601c26146032",
+  "url": "https://github.com/hxt7198302/class-notes/releases/download/v2.13/%E8%AF%BE%E5%A0%82%E7%AC%94%E8%AE%B0-v2.13.apk",
+  "source": "https://github.com/hxt7198302/class-notes/tree/main/%E5%AE%89%E5%8D%93APP",
+  "mirror": "https://cdn.jsdelivr.net/gh/hxt7198302/class-notes@main/releases/version.json"
+}

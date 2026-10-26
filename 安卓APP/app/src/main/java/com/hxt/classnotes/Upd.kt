@@ -22,8 +22,8 @@ import java.security.MessageDigest
  */
 object Upd {
     // v2.0 前端改版：与 build.gradle 的 versionCode/versionName 必须同步（v1.9 曾漏更，导致头部显示 1.8 且误报更新）
-    const val VERSION_CODE = 17
-    const val VERSION_NAME = "2.5"
+    const val VERSION_CODE = 26
+    const val VERSION_NAME = "2.13"
 
     private val handler = Handler(Looper.getMainLooper())
     private var checked = false   // 每次开 APP 只静默查一次

@@ -1,22 +1,21 @@
 // 课堂笔记分析流水线：一个会话一条龙「转写 → AI 分析 → 推送」。
 // 用法：node pipeline.mjs <sessionId>
-// 转写用本机 faster-whisper（GPU 优先）；AI 分析用 ZCode 无头会话执行
-// 《分析任务说明.md》。全程状态写 笔记/<id>/status.json，日志写 电脑端/logs/<id>.log。
+// 转写用本机 faster-whisper（GPU 优先）；AI 分析用无头会话执行分析手册
+// （zcode 引擎需自备 CLI 与分析手册，公开版默认用 glm/template 引擎）。
+// 全程状态写 笔记/<id>/status.json，日志写 电脑端/logs/<id>.log。
 import fs from 'fs';
 import path from 'path';
 import { spawn } from 'child_process';
 import { fileURLToPath, pathToFileURL } from 'url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.join(HERE, '..');   // 程序根目录（HERE=电脑端，退一级即到）
+const ROOT = path.join(HERE, '..');   // 任务根目录（HERE=电脑端，退一级即到）
 const SUCAI = id => path.join(ROOT, '素材', id);
 const BIJI = id => path.join(ROOT, '笔记', id);
 const CFG = JSON.parse(fs.readFileSync(path.join(HERE, 'config.json'), 'utf8'));
 const NTFY_TOPIC = CFG.ntfyTopic;
-// 可选的私有 AI 引擎（engine=zcode 时才用）：用环境变量 ZCODE_CLI 指向你自己的无头 CLI。
-// 公开版默认留空，普通用户走 engine=glm（免费 API Key）或 template（无 AI 转写稿）。
-const ZCODE_CLI = process.env.ZCODE_CLI || CFG.zcodeCli || '';
-const MANUAL = path.join(HERE, '分析任务说明.md');
+const ZCODE_CLI = process.env.ZCODE_CLI || path.join(ROOT, 'zcode', 'zcode.cjs');
+const MANUAL = path.join(HERE, '分析任务说明.md'); // 公开版不包含该私有手册；使用 zcode 引擎时需自备
 
 const id = process.argv[2];
 const logFile = path.join(HERE, 'logs', `${id}.log`);
@@ -66,6 +65,50 @@ function run(cmd, args, opts = {}) {
 }
 let curRunChild = null;   // 当前正在等待的子进程（总守卫用）
 
+// ---------- GPU 转写互斥锁（v2.2） ----------
+// 服务端允许最多 maxParallel 条流水线并行（AI 分析阶段可以同时跑），但本机 GPU 一次只吃得下
+// 一个 large-v3：转写阶段用一把跨进程文件锁串行，后来者排队等，分析阶段不受影响。
+// 锁目录每 30 秒 touch 一次当心跳；持有者被强杀后 2 分钟自动判定陈旧并挪走（不删，留 .stale-*）。
+const LOCK_DIR = path.join(HERE, '.transcribe.lock');
+const LOCK_STALE_MS = 2 * 60 * 1000;
+let lockBeat = null;
+function lockHeldByMe() {
+  try { return fs.readFileSync(path.join(LOCK_DIR, 'owner.txt'), 'utf8').includes(String(process.pid)); } catch { return false; }
+}
+async function acquireTranscribeLock() {
+  const t0 = Date.now();
+  let announced = false;
+  for (;;) {
+    try {
+      fs.mkdirSync(LOCK_DIR);
+      fs.writeFileSync(path.join(LOCK_DIR, 'owner.txt'), `${id} ${process.pid} ${new Date().toISOString()}`);
+      lockBeat = setInterval(() => { try { const n = new Date(); fs.utimesSync(LOCK_DIR, n, n); } catch { } }, 30000);
+      lockBeat.unref();
+      log('[lock] 已拿到转写锁（GPU 独占）');
+      return true;
+    } catch (e) {
+      if (e.code !== 'EEXIST') { log('[lock] 拿转写锁出错（不等待，直接跑）：' + e.message); return false; }
+    }
+    try {
+      const age = Date.now() - fs.statSync(LOCK_DIR).mtimeMs;
+      if (age > LOCK_STALE_MS) {
+        const stale = LOCK_DIR + '.stale-' + new Date().toISOString().replace(/[:.]/g, '-');
+        fs.renameSync(LOCK_DIR, stale);
+        log('[lock] 清理陈旧转写锁（持有者已退出）→ ' + path.basename(stale));
+        continue;
+      }
+    } catch { }
+    if (!announced) { log('[lock] 另一条流水线正在转写，排队等 GPU…'); announced = true; }
+    if (Date.now() - t0 > 60 * 60 * 1000) { log('[lock] 等锁超 60 分钟，不再等（可能撞车）'); return false; }
+    await new Promise(r => setTimeout(r, 10000));
+  }
+}
+function releaseTranscribeLock() {
+  try { if (lockBeat) { clearInterval(lockBeat); lockBeat = null; } } catch { }
+  try { if (lockHeldByMe()) fs.rmSync(LOCK_DIR, { recursive: true, force: true }); } catch { }
+}
+process.on('exit', releaseTranscribeLock);
+
 // 总守卫：单条流水线 3.5 小时还没收尾（2026-09-29 实发过：无头分析会话挂死 7 小时，
 // 服务端队列跟着卡死）就强杀当前子进程并终止自己——进程退出即解锁服务端队列
 const TOTAL_DEADLINE_MS = 3.5 * 60 * 60 * 1000;
@@ -88,12 +131,64 @@ async function ntfyPush(title, body) {
   } catch (e) { log(`[ntfy] 推送失败 ${e.message}`); }
 }
 
+// 每课笔记做完，把这节课抽出的待办事项（items.json）推到手机。
+// 走可配置的外部推送脚本（config.phonePushScript，自己写一个接收 -PayloadFile 的脚本即可）；
+// 正文经 UTF-8 文件传参避开 Windows GBK 控制台命令行中文乱码。best-effort：失败只记日志，
+// 绝不影响笔记交付。config 没配 phonePushScript 时整步静默跳过（开源一键包默认不配）。
+const PHONE_SEND = CFG.phonePushScript || '';
+async function pushTodosToPhone(course, title) {
+  try {
+    if (!PHONE_SEND || !fs.existsSync(PHONE_SEND)) return;
+    const items = readJson(path.join(BIJI(id), 'items.json'), []);
+    if (!Array.isArray(items) || items.length === 0) { log('[todo-push] 本课没有抽出待办事项，不推送'); return; }
+    const rows = items
+      .slice().sort((a, b) => (b.urgent ? 1 : 0) - (a.urgent ? 1 : 0))
+      .map((it, i) => {
+        const due = it.due ? `截止 ${it.due}` : '无明确截止·尽快';
+        const quote = String(it.quote || '').replace(/\s+/g, ' ').slice(0, 60);
+        return `${i + 1}. ${it.urgent ? '🔴' : '·'} ${it.title}（${due}）${quote ? '\n   老师原话：' + quote : ''}`;
+      });
+    const payload = {
+      title: `📋 课堂待办·${title || course}（${items.length}条）`,
+      message: `《${course}》这节课抽出的待办事项：\n\n${rows.join('\n')}\n\n已同步到课堂笔记APP课程页待办，点一下即消。`,
+    };
+    const tmp = path.join(HERE, 'logs', `${id}.todo-push.json`);
+    fs.writeFileSync(tmp, JSON.stringify(payload, null, 1), 'utf8');
+    const r = await run('powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', PHONE_SEND, '-Channel', 'auto', '-PayloadFile', tmp],
+      { timeoutMs: 3 * 60 * 1000 });
+    const tail = String(r.out || '').split('\n').filter(Boolean).slice(-1)[0] || '';
+    log(`[todo-push] ${items.length} 条待办 → 手机 ${r.code === 0 ? '已送达' : '失败'} ${tail.slice(0, 150)}`);
+  } catch (e) {
+    log(`[todo-push] 推送异常（不影响笔记交付）：${e.message}`);
+  }
+}
+
+// 内容安全拦截（[1301]）只会写在 ZCode 的 sqlite 里，CLI 输出通常只有一句
+// 「Turn execution failed (traceId: …)」。失败后按 traceId 回查一次，准确判永久失败。
+const ZCODE_DB = path.join(process.env.USERPROFILE || '', '.zcode', 'cli', 'db', 'db.sqlite');
+async function traceError(traceId) {
+  try {
+    if (!CFG.pythonCmd || !fs.existsSync(ZCODE_DB)) return '';
+    const code = 'import sqlite3,sys\n' +
+      'c=sqlite3.connect("file:"+sys.argv[1]+"?mode=ro",uri=True)\n' +
+      'r=c.execute("select error_type,error_code,substr(error_message,1,300) from model_usage where trace_id=? order by started_at desc limit 1",(sys.argv[2],)).fetchone()\n' +
+      'print(" | ".join(str(x) for x in r) if r else "")';
+    const r = await run(CFG.pythonCmd, ['-c', code, ZCODE_DB, traceId], { timeoutMs: 25000 });
+    return String(r.out || '').trim();
+  } catch { return ''; }
+}
+
 async function main() {
   if (!id || !/^[A-Za-z0-9_-]{6,64}$/.test(id)) { log('[X] 会话 id 不合法'); return; }
   const meta = readJson(path.join(SUCAI(id), 'meta.json'), null);
   if (!meta) { log(`[X] ${id} 没有 meta.json，跳过`); return; }
   const st0 = readJson(path.join(BIJI(id), 'status.json'), {});
-  if (st0.state === 'done') { log(`[skip] ${id} 已完成`); return; }
+  // v2.2 修（2026-10-16 高数事故）：分析期间并进来的同课素材会把 mergeDirty 置 true 并重新入队，
+  // 旧代码只看 state=done 就 [skip]，补跑永远跑不起来——第二节课和照片就这么被吞了。
+  // 现在 done + mergeDirty 必须放行，补跑只转写新增段（段级 transcribe.done 缓存）。
+  if (st0.state === 'done' && meta.mergeDirty !== true) { log(`[skip] ${id} 已完成`); return; }
+  if (st0.state === 'done' && meta.mergeDirty === true) log(`[resume] ${id} 分析期间有同课新素材并入，补跑`);
   if (st0.state === 'analyzing') { log(`[skip] ${id} 正在分析（可能另一条流水线在跑）`); return; }
 
   log(`===== 开始处理 ${id}（课程：${meta.course}）=====`);
@@ -116,9 +211,28 @@ async function main() {
 
   const fmtTs = sec => { const s = Math.max(0, Math.floor(sec)); return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`; };
   const py = CFG.pythonCmd || 'python';
+  // v2.8 术语热词：APP 课程页填的「课程术语」→ faster-whisper hotwords，专治专业名词听错
+  let hotwords = '';
+  try {
+    const tCfg = JSON.parse(fs.readFileSync(path.join(HERE, 'course-terms.json'), 'utf8'));
+    const norm = s => String(s || '').replace(/[（(].*?[)）]|\s|·/g, '').trim();
+    const mc = norm(meta.course);
+    const keys = Object.keys(tCfg).filter(k => k && typeof tCfg[k] === 'string' && tCfg[k].trim());
+    // 精确 → 归一化相等 → 互相包含（"高等数学" 配得上 "高等数学(1)"）
+    const key = keys.find(k => k === meta.course) ||
+      keys.find(k => mc && norm(k) === mc) ||
+      keys.find(k => mc && (mc.includes(norm(k)) || norm(k).includes(mc)));
+    if (key && typeof tCfg[key] === 'string') hotwords = tCfg[key].trim().slice(0, 200);
+    if (hotwords) log(`[hotwords] 《${meta.course}》注入术语热词：${hotwords}`);
+  } catch { }
   let doneCount = 0;
   const allRows = [];
   const skipped = [];   // 转写失败/缺失的段：跳过不拖死整堂课，合并时在时间轴上留缺口标记
+  // v2.2：分析阶段允许并行，但转写阶段仍必须独占 GPU；全部段都有缓存时不用等锁
+  const needTranscribe = segs.some((s, i) => fs.existsSync(matFile(s)) &&
+    !fs.existsSync(path.join(SUCAI(id), 'seg_' + String(i).padStart(2, '0'), 'transcribe.done')));
+  let lockHeld = false;
+  if (needTranscribe) lockHeld = await acquireTranscribeLock();
   for (let i = 0; i < segs.length; i++) {
     const seg = segs[i];
     const inFile = matFile(seg);
@@ -135,11 +249,13 @@ async function main() {
       const base = Math.round(doneCount / segs.length * 100);
       const span = Math.max(1, Math.round(100 / segs.length));
       writeStatus(id, { state: 'transcribing', progress: base });
-      const r = await run(py, [
+      const tArgs = [
         path.join(HERE, 'transcribe.py'),
         '--input', inFile, '--outdir', outDir,
         '--model', CFG.whisperModel || 'large-v3', '--lang', CFG.lang || 'zh',
-      ], {
+      ];
+      if (hotwords) tArgs.push('--hotwords', hotwords);
+      const r = await run(py, tArgs, {
         timeoutMs: 90 * 60 * 1000,
         onLine: line => {
           const m = line.match(/"progress":\s*(\d+)/);
@@ -179,6 +295,7 @@ async function main() {
     txtLines.splice(pos, 0, marker);
   }
   fs.writeFileSync(path.join(SUCAI(id), 'transcript.txt'), txtLines.join('\n'));
+  if (lockHeld) { releaseTranscribeLock(); lockHeld = false; }   // 转写完了，把 GPU 让给排队的课
   log(`[transcribe] 合并完成：${allRows.length} 段文本 / 成功 ${doneCount}/${segs.length} 段` + (skipped.length ? `（跳过：${skipped.map(s => s.name).join('、')}）` : ''));
 
   // ---------- 2) AI 分析（引擎可插拔：zcode=原私有无头会话 / glm=免费key云API / template=无AI转写稿） ----------
@@ -199,18 +316,12 @@ async function main() {
       return;
     }
     await ntfyPush('classnotes-done', `《${meta.course}》笔记整理好了（${ENGINE === 'glm' ? 'AI 整理' : '转写稿'}），打开课堂笔记APP看`);
+    await pushTodosToPhone(meta.course, meta.course);
     log('===== 流水线结束 =====');
     return;
   }
 
   // ---- 以下为原私有引擎（zcode 无头会话），保持 v1.x 行为不变 ----
-  // 开源版提示：没有配置 ZCODE_CLI 就直接报清楚，别让 node 拿着空路径瞎跑
-  if (!ZCODE_CLI || !fs.existsSync(ZCODE_CLI)) {
-    const msg = '引擎 engine=zcode 需要先配置无头 CLI：设置环境变量 ZCODE_CLI 指向 CLI 的 .cjs/.js，或在 config.json 里加 "zcodeCli"。普通用户请改用 engine=glm 或 template。';
-    writeStatus(id, { state: 'error', error: msg });
-    log('[X] ' + msg);
-    return;
-  }
   // v1.6 例题汇总：用户在 APP 课程页给这门课开了开关（电脑端\course-config.json），
   // 才在指令里点名——手册 §2.8 只在点名时执行，没开的课笔记保持原样
   let extra = '';
@@ -221,16 +332,46 @@ async function main() {
       log(`[examples] 《${meta.course}》开了例题汇总，指令已注入`);
     }
   } catch { }
+  // v2.6 理科推导版：数理课的例题/推导/证明按手册 §2.9 的步骤行写（其余课程完全不变）
+  const DERIVE_COURSES = ['高数', '高等数学', '线性代数', '线代', '大学物理', '概率', '离散', '复变', '数学分析', '计算方法'];
+  if (DERIVE_COURSES.some(k => String(meta.course || '').includes(k))) {
+    extra += ` 本课程《${meta.course}》属理科推导课：例题/推导/证明小节按手册 §2.9 的「- ① 公式 ｜ 旁注」步骤行写，其余小节照旧。`;
+    log(`[derive] 《${meta.course}》按理科推导格式注入`);
+  }
   const prompt = `读取并严格执行 ${MANUAL} 中的课堂记录分析流程，本次处理的会话 ID：${id}。${extra}`;
   let r2 = null;
   for (let attempt = 1; attempt <= 3; attempt++) {
     log(`[analyze] 拉起无头会话（第 ${attempt}/3 次）…`);
-    r2 = await run(process.execPath, [ZCODE_CLI, '--prompt', prompt, '--cwd', process.env.ZCODE_CWD || ROOT, '--no-color'], {
+    r2 = await run(process.execPath, [ZCODE_CLI, '--prompt', prompt, '--cwd', ROOT, '--no-color'], {
       timeoutMs: 45 * 60 * 1000,
     });
     log(`[analyze] exit=${r2.code} ${Math.round(r2.ms / 1000)}s 尾部: ${r2.out.split('\n').slice(-3).join(' | ')}`);
     const okNote = fs.existsSync(path.join(BIJI(id), 'note.md')) && readJson(path.join(BIJI(id), 'status.json'), {}).state === 'done';
-    if (r2.code === 0 && okNote) break;
+    // 成品已交付就收工，不苛求退出码 0：分析会话交付笔记后还跑 026 对照轮等收尾活，
+    // 那里挂了会以 exit=1 退场（2026-10-09 程序设计课实发：第 2 次已交付、对照轮 Turn
+    // 失败 exit=1，旧逻辑又拉第 3 次重试把 done 状态误盖成 error）。对照轮本就是
+    // best-effort，不该连累主笔记。
+    if (okNote) { log('[analyze] 笔记已交付（退出码非 0 但成品在），收工'); break; }
+    // 内容安全拦截是永久性失败（近 7 天出现 51 次，全是国家安全/近代史这类课）：GLM 返回
+    // [1301] potentially unsafe content，重试多少次都一样，只会每次白烧几分钟~几十分钟并占队列。
+    // 标记 permanentFailure，rescan 不再自动重排；要再试由手动 /api/reanalyze 触发。
+    let safetyHit = /\[1301\]|potentially unsafe or sensitive content/i.test(String(r2.out || ''));
+    if (!safetyHit) {
+      const tm = String(r2.out || '').match(/traceId:\s*([0-9a-f-]{36})/i);
+      if (tm) {
+        const info = await traceError(tm[1]);
+        if (info) log(`[analyze] traceId ${tm[1]} 回查：${info.slice(0, 200)}`);
+        if (/1301|unsafe|sensitive/i.test(info)) safetyHit = true;
+      }
+    }
+    if (safetyHit) {
+      log('[analyze] 命中内容安全拦截（1301），重试不会成功，停止');
+      writeStatus(id, {
+        state: 'error', permanentFailure: true,
+        error: 'AI 内容安全拦截（1301）：模型认为本课内容敏感，自动重试不会成功。需要手动重跑或换引擎/模型。',
+      });
+      break;
+    }
     if (attempt < 3) {
       log(`[analyze] 第 ${attempt} 次未交付，60 秒后重试`);
       await new Promise(res => setTimeout(res, 60 * 1000));
@@ -244,6 +385,7 @@ async function main() {
   if (st.state === 'done' && fs.existsSync(noteFile)) {
     log(`[done] ${id} 笔记完成`);
     await ntfyPush('classnotes-done', `《${st.title || meta.course}》笔记整理好了，打开课堂笔记APP看`);
+    await pushTodosToPhone(meta.course, st.title);
   } else {
     const err = st.error || `分析会话退出码 ${r2.code} 但没交付 note.md`;
     writeStatus(id, { state: 'error', error: err });

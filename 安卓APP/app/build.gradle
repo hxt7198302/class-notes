@@ -11,8 +11,8 @@ android {
         applicationId "com.hxt.classnotes"
         minSdk 26
         targetSdk 34
-        versionCode 17
-        versionName "2.5"
+        versionCode 26
+        versionName "2.13"
     }
 
     buildTypes {
@@ -33,6 +33,12 @@ android {
                 exclude '**/备份/**'
             }
         }
+    }
+
+    // 2026-10-23 补：上面的 sourceSets 写法对 Kotlin 1.9 不生效（KGP 不读 Java source set 的 exclude），
+    // 备份的 .kt 仍被编进源码集报 Redeclaration。改为在编译任务上再排一次。
+    tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+        exclude '**/备份/**'
     }
 
     compileOptions {

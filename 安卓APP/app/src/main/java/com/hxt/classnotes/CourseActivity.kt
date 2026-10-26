@@ -1,6 +1,7 @@
 package com.hxt.classnotes
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.graphics.Color
 import android.net.Uri
@@ -12,6 +13,7 @@ import android.view.ViewGroup
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
 import java.io.File
@@ -116,8 +118,10 @@ class CourseActivity : Activity() {
         }
     }
 
-    // ---------- 顶层：作业汇总 + 小助手倒计时 + 课程文件夹 ----------
+    // ---------- 顶层：学习通入口 + 作业汇总 + 小助手倒计时 + 课程文件夹 ----------
     private fun renderRoot() {
+        // v2.11 学习通入口：独立一张卡，不混进「作业汇总/待办」（用户确认的边界）
+        container.addView(chaoxingCard())
         val list = agg?.optJSONArray("list")
         if (list == null) {
             container.addView(Ui.text(this, "待办和总纲要连上家里电脑才能看（素材和笔记不会丢）。连上 WiFi 打开 APP 会自动重试。", 13, Ui.ORANGE).apply { setPadding(Ui.dp(20), Ui.dp(12), Ui.dp(20), 0) })
@@ -215,6 +219,33 @@ class CourseActivity : Activity() {
             if (seen.isEmpty()) card.addView(Ui.text(this, "还没有课程。上完第一节课就会出现在这里。", 13, Ui.TEXT_SUB))
         }
         container.addView(card)
+    }
+
+    /** 学习通入口卡：有本地缓存就显示上次的计数（不发网络请求，秒开） */
+    private fun chaoxingCard(): View {
+        val card = Ui.card(this)
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.HORIZONTAL
+        val col = LinearLayout(this)
+        col.orientation = LinearLayout.VERTICAL
+        col.addView(Ui.text(this, "📖 学习通", 15, Ui.TEXT, true))
+        var sub = "扫码登录后看作业 / 通知 / 考试 / 章节进度"
+        try {
+            val f = File(filesDir, "chaoxing-cache.json")
+            if (f.exists() && f.length() > 0) {
+                val s = JSONObject(f.readText(Charsets.UTF_8))
+                    .optJSONObject("data")?.optJSONObject("summary")
+                if (s != null) {
+                    sub = "未交 ${s.optInt("pending")} · 待互评 ${s.optInt("peer")} · 未读通知 ${s.optInt("unread")}"
+                }
+            }
+        } catch (_: Exception) { }
+        col.addView(Ui.text(this, sub, 12, Ui.TEXT_SUB))
+        row.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        row.addView(Ui.text(this, "›", 22, Ui.PRIMARY))
+        card.addView(row)
+        card.setOnClickListener { startActivity(Intent(this, ChaoxingActivity::class.java)) }
+        return card
     }
 
     private fun courseRow(course: String, sub: String): View {
@@ -356,6 +387,21 @@ class CourseActivity : Activity() {
         exCard.addView(exBtn)
         container.addView(exCard)
 
+        // 课程术语（v2.8）：这门课的专业名词 → 电脑转写当热词，专治「洛必达」听成「罗必达」
+        val termCard = Ui.card(this)
+        termCard.addView(Ui.text(this, "📝 课程术语", 15, Ui.TEXT, true))
+        val curTerms = termsOf(currentCourse)
+        termCard.addView(Ui.text(this,
+            if (curTerms.isEmpty()) "还没填。填上这门课常出现的专业名词（空格分隔），电脑转写时会照着认，名字/术语不容易听错。"
+            else "已生效：$curTerms",
+            if (curTerms.isEmpty()) 12 else 13, if (curTerms.isEmpty()) Ui.TEXT_SUB else Ui.TEXT))
+        termCard.addView(Ui.text(this, "只影响以后的录音转写，已有的笔记不变；上限 200 字。", 11, Ui.TEXT_SUB))
+        val termBtn = Ui.button(this, if (curTerms.isEmpty()) "填写课程术语" else "修改术语", false)
+        termBtn.layoutParams = (LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)).also { it.topMargin = Ui.dp(6) }
+        termBtn.setOnClickListener { editTerms() }
+        termCard.addView(termBtn)
+        container.addView(termCard)
+
         // 待办（v1.7：点 ☐ 完成，勾一下就消失；过期默认收起）
         val todoCard = Ui.card(this)
         todoCard.addView(Ui.text(this, "📋 待办（点 ☐ 完成）", 15, Ui.TEXT, true))
@@ -470,6 +516,57 @@ class CourseActivity : Activity() {
                     ok -> "已关闭。以后的笔记不再带「例题汇总」"
                     else -> "设置已存手机，暂时连不上电脑（连上后自动同步）"
                 })
+            }
+        }.start()
+    }
+
+    // ---------- 课程术语（v2.8） ----------
+    /** 手机本地是真相源；本地没设过的课，用服务端下发的术语补上（换机/重装不丢） */
+    private fun termsOf(course: String): String {
+        if (Db.meta("termsSet_$course") != "1") {
+            val srv = agg?.optJSONObject("terms")?.optString(course) ?: ""
+            if (srv.isNotEmpty()) {
+                Db.setMeta("terms_$course", srv)
+                Db.setMeta("termsSet_$course", "1")
+            }
+            return srv
+        }
+        return Db.meta("terms_$course")
+    }
+
+    private fun editTerms() {
+        val et = EditText(this)
+        et.setText(termsOf(currentCourse))
+        et.hint = "空格分隔，例如：极限 导数 微分 洛必达法则"
+        et.minLines = 3
+        et.gravity = android.view.Gravity.TOP or android.view.Gravity.START
+        et.setPadding(Ui.dp(16), Ui.dp(8), Ui.dp(16), Ui.dp(8))
+        AlertDialog.Builder(this)
+            .setTitle("课程术语 · $currentCourse")
+            .setMessage("转写时电脑会优先认出这些词。填最常被听错的专业名词即可，不用多。")
+            .setView(et)
+            .setPositiveButton("保存") { _, _ -> saveTerms(et.text.toString()) }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun saveTerms(raw: String) {
+        val clean = raw.replace(Regex("\\s+"), " ").trim()
+        val val2 = clean.take(200)
+        Db.setMeta("terms_$currentCourse", val2)
+        Db.setMeta("termsSet_$currentCourse", "1")
+        render()
+        if (clean.length > 200) Ui.toast(this, "超过 200 字，已截断（太长反而会降转写质量）")
+        Thread {
+            // 这门课可能只存在于电脑端课程文件夹（没在手机「新建课程」里出现过），
+            // 所以本次保存的这门课要显式塞进推送表，不能只靠 Db.courses() 遍历
+            val terms = HashMap(Api.termPrefs())
+            terms[currentCourse] = val2
+            val ok = try { Api.pushCourseConfig(Api.examplePrefs(), terms) } catch (_: Exception) { false }
+            handler.post {
+                if (isFinishing || isDestroyed) return@post
+                Ui.toast(this, if (ok) "术语已保存，下次录音转写生效"
+                else "术语已存手机，暂时连不上电脑（连上后自动同步）")
             }
         }.start()
     }

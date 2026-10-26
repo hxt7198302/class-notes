@@ -14,20 +14,40 @@ import java.security.MessageDigest
  * 上传采用 3MB 分块 + 服务端按字节续传：隧道抖动从断点继续，不重传整堂课。
  */
 object Api {
-    // v2.0：token/ntfy 频道可配（「连接电脑」配对后写进 Db）
-    // 开源版：不内置任何配对口令与通知频道——首次使用在 APP 里点「连接电脑」配对后自动写入（见 PairActivity）。
-    // 想给自己的班级预置固定口令，可在打包时改这两个常量，别把改动后的版本公开。
-    const val DEFAULT_TOKEN = ""
-    private const val DEFAULT_TOPIC = ""
+    // v2.0：token/ntfy 频道可配（「连接电脑」配对后写进 Db）。
+    // 开源版不内置任何口令：这两个是占位符，空白安装必须靠下面 connect() 的「先装凭证再探活」完成首次配对。
+    const val DEFAULT_TOKEN = "请先与你的电脑配对"
+    private const val DEFAULT_TOPIC = "your-ntfy-topic"
     @Volatile var TOKEN: String = DEFAULT_TOKEN
     @Volatile private var ntfyTopicV: String = DEFAULT_TOPIC
     private const val KEY_URL = "serverUrl"
-    private const val CHUNK = 3 * 1024 * 1024
+    // v2.10：3 MiB → 512 KiB。服务端是「收满一块才落盘」，弱网/切后台时一块废掉就是全白传；
+    // 512 KiB 在隧道里 6~8 秒一块，被掐断的概率低得多，重传代价也小。局域网下这点开销可忽略。
+    private const val CHUNK = 512 * 1024
 
     /** 进 APP 时调一次：把配对保存的 token/频道装进来 */
     fun initCredentials() {
         val t = Db.meta("appToken"); if (t.isNotEmpty()) TOKEN = t
         val tp = Db.meta("ntfyTopic"); if (tp.isNotEmpty()) ntfyTopicV = tp
+    }
+
+    // v2.9：上传保活用的 Application Context（App.onCreate 里塞进来）
+    @Volatile private var appCtx: android.content.Context? = null
+    fun initCtx(c: android.content.Context) { appCtx = c.applicationContext }
+
+    // 上传引用计数：第一节开始时拉起前台服务，最后一节结束时撤掉
+    private val uploadBusy = java.util.concurrent.atomic.AtomicInteger()
+    private fun uploadBegin() {
+        if (uploadBusy.incrementAndGet() == 1) {
+            appCtx?.let { Sync.ensure(it) }
+            Sync.progress("正在上传课堂笔记", "可以切后台或锁屏，传完自动收尾")
+        }
+    }
+    private fun uploadEnd() {
+        if (uploadBusy.decrementAndGet() <= 0) {
+            uploadBusy.set(0)
+            appCtx?.let { Sync.stop(it) }
+        }
     }
 
     fun ntfyTopic(): String = ntfyTopicV
@@ -115,42 +135,102 @@ object Api {
     /** 正在上传的会话（uploading 卡死自愈用：不把正在传的拨回 ready） */
     val activeUploads = java.util.Collections.synchronizedSet(HashSet<String>())
 
-    fun discoverUrl(): String? {
-        return try {
+    // v2.9：电脑同时广播两条——隧道的 https 网址（classnotes-url）和局域网地址（classnotes-lan）。
+    // 同一 WiFi 时优先走局域网（速度是隧道的几十倍）；不在同一 WiFi 就 1.5 秒探不通，自动退回隧道。
+    @Volatile private var ntfyAt = 0L
+    @Volatile private var ntfyUrl: String? = null
+    @Volatile private var ntfyLan: String? = null
+
+    private fun ntfyFetch() {
+        val now = System.currentTimeMillis()
+        if (now - ntfyAt < 60_000) return
+        ntfyAt = now
+        ntfyUrl = null
+        ntfyLan = null
+        try {
             val (code, text) = http("https://ntfy.sh/${ntfyTopic()}/json?poll=1&since=2h", timeout = 8000)
-            if (code != 200) return null
-            var last: String? = null
+            if (code != 200) return
             for (line in text.split("\n")) {
                 if (line.isBlank()) continue
                 try {
                     val o = JSONObject(line)
-                    if (o.optString("event") == "message" && o.optString("title") == "classnotes-url") {
-                        val u = o.optString("message")
-                        if (u.startsWith("https://")) last = u
+                    if (o.optString("event") != "message") continue
+                    val u = o.optString("message")
+                    when (o.optString("title")) {
+                        "classnotes-url" -> if (u.startsWith("https://")) ntfyUrl = u
+                        "classnotes-lan" -> if (u.startsWith("http://")) ntfyLan = u
                     }
                 } catch (_: Exception) { }
             }
-            last
-        } catch (_: Exception) { null }
+        } catch (_: Exception) { }
     }
 
-    private fun pingOk(url: String): Boolean {
+    fun discoverUrl(): String? { ntfyFetch(); return ntfyUrl }
+
+    private fun pingOk(url: String, timeout: Int = 6000): Boolean {
         return try {
-            val (code, text) = http("$url/api/ping", timeout = 6000)
+            val (code, text) = http("$url/api/ping", timeout = timeout)
             code == 200 && JSONObject(text).optBoolean("ok", false)
         } catch (_: Exception) { false }
+    }
+
+    // 局域网地址：探通就缓存 10 分钟；探不通 1 分钟内不再试（免得每次请求都白等 1.5 秒）
+    @Volatile private var lanTryAt = 0L
+    @Volatile private var lanGood: String? = null
+
+    fun lanUrl(): String? {
+        val now = System.currentTimeMillis()
+        lanGood?.let { if (now - lanTryAt < 10 * 60_000) return it }
+        if (now - lanTryAt < 60_000) return null
+        lanTryAt = now
+        lanGood = null
+        ntfyFetch()
+        val cand = ntfyLan
+        if (cand != null && pingOk(cand, 1500)) lanGood = cand
+        return lanGood
     }
 
     fun workingUrl(): String? {
         val now = System.currentTimeMillis()
         cachedUrl?.let { if (now - cachedAt < 90_000) return it }
         if (now - lastFailAt < 20_000) return null
+        lanUrl()?.let { cachedUrl = it; cachedAt = now; route = ROUTE_LAN; return it }   // v2.9 局域网优先
         val saved = savedUrl()
-        if (saved.isNotEmpty() && pingOk(saved)) { cachedUrl = saved; cachedAt = now; return saved }
+        if (saved.isNotEmpty() && pingOk(saved)) { cachedUrl = saved; cachedAt = now; route = ROUTE_NET; return saved }
         val found = discoverUrl() ?: run { lastFailAt = now; return null }
-        if (pingOk(found)) { setSavedUrl(found); cachedUrl = found; cachedAt = now; return found }
+        if (pingOk(found)) { setSavedUrl(found); cachedUrl = found; cachedAt = now; route = ROUTE_NET; return found }
         lastFailAt = now
         return null
+    }
+
+    // v2.10：把当前线路亮出来（局域网 / 隧道），传得慢或断了，一眼就知道走的是哪条
+    const val ROUTE_LAN = "局域网"
+    const val ROUTE_NET = "隧道"
+    @Volatile private var route = ROUTE_NET
+
+    fun currentRoute(): String = route
+
+    /** 局域网连着失败两次：5 分钟内不再走局域网，直接用隧道（坏线路别反复卡） */
+    fun markLanBad() {
+        lanGood = null
+        lanTryAt = System.currentTimeMillis() + 4 * 60_000   // 让 lanUrl() 的 60 秒冷却直接跳到 5 分钟后
+        route = ROUTE_NET
+        invalidateUrl()
+    }
+
+    /** v2.10：手机端出了什么错也送回电脑（尽力而为，不打扰用户），免得只能靠猜 */
+    fun reportClientLog(kind: String, text: String) {
+        Thread {
+            try {
+                val url = workingUrl() ?: return@Thread
+                val body = JSONObject()
+                    .put("kind", kind)
+                    .put("text", text.take(4000))
+                    .put("route", route)
+                    .toString()
+                http("$url/api/client-log", "POST", body, 8000)
+            } catch (_: Exception) { }
+        }.start()
     }
 
     // ---------- 上传一个会话 ----------
@@ -161,11 +241,13 @@ object Api {
     fun uploadSession(sid: String): String? {
         if (!uploading.add(sid)) return null   // 已有线程在传这一节，后到的直接当成功，别并发
         activeUploads.add(sid)
+        uploadBegin()
         try {
             return uploadSessionInner(sid)
         } finally {
             activeUploads.remove(sid)
             uploading.remove(sid)
+            uploadEnd()
         }
     }
 
@@ -174,11 +256,39 @@ object Api {
         if (names.isEmpty()) return null
         if (!uploading.add(sid)) return "这一节正在上传，稍后自动重试"
         activeUploads.add(sid)
+        uploadBegin()
         try {
             return uploadSessionInner(sid, names.toHashSet())
         } finally {
             activeUploads.remove(sid)
             uploading.remove(sid)
+            uploadEnd()
+        }
+    }
+
+    // ---------- 带进度事件的上传（2026-10-24 由测试版并入生产） ----------
+    /** 每块上传后的实测数据；UI 只消费这些数，不自己推算 */
+    data class TxEvent(
+        val sid: String, val name: String, val fileSize: Long,
+        val chunkStart: Long, val chunkBytes: Long, val received: Long,
+        val retry: Int, val ok: Boolean, val offsetMismatch: Boolean = false
+    )
+
+    /** 上传结果：忙不能当成成功（原 uploadSession 在“已有线程在传”时返回 null，有二义性） */
+    data class UploadOutcome(val ok: Boolean, val busy: Boolean, val error: String?)
+
+    /** 重传面板用：结果三态 + 每块进度回调 */
+    fun uploadSessionTracked(sid: String, only: Set<String>? = null, onEvent: (TxEvent) -> Unit): UploadOutcome {
+        if (!uploading.add(sid)) return UploadOutcome(false, true, "这一节正在上传，请等它结束")
+        activeUploads.add(sid)
+        uploadBegin()
+        try {
+            val err = uploadSessionInner(sid, only, onEvent)
+            return UploadOutcome(err == null, false, err)
+        } finally {
+            activeUploads.remove(sid)
+            uploading.remove(sid)
+            uploadEnd()
         }
     }
 
@@ -214,7 +324,10 @@ object Api {
         } catch (_: Exception) { false }
     }
 
-    private fun uploadSessionInner(sid: String, only: Set<String>? = null): String? {
+    private fun uploadSessionInner(
+        sid: String, only: Set<String>? = null,
+        onEvent: ((TxEvent) -> Unit)? = null
+    ): String? {
         val url = workingUrl() ?: return "连不上电脑（隧道没通/电脑关机），素材还在手机里，稍后再传"
         val s = Db.session(sid) ?: return "会话不存在"
         val segs = Db.segments(sid)
@@ -252,12 +365,12 @@ object Api {
             for (i in 0 until segs.length()) {
                 val name = segs.getJSONObject(i).getString("name")
                 if (only != null && name !in only) continue
-                uploadFile(url, sid, File(dir, name), name, received)
+                uploadFile(url, sid, File(dir, name), name, received, onEvent)
             }
             for (i in 0 until ph.length()) {
                 val name = ph.getJSONObject(i).getString("name")
                 if (only != null && name !in only) continue
-                uploadFile(url, sid, File(dir, name), name, received)
+                uploadFile(url, sid, File(dir, name), name, received, onEvent)
             }
         } catch (e: Exception) {
             return e.message ?: "上传中断"
@@ -268,39 +381,155 @@ object Api {
         return null
     }
 
-    private fun uploadFile(base: String, sid: String, f: File, name: String, received: HashMap<String, Long>) {
+    /** v2.10：网络中断的退避（1s→2s→4s→8s→15s 封顶） */
+    private fun backoffMs(n: Int): Long = when {
+        n <= 1 -> 1000L
+        n <= 3 -> 2000L * n
+        n <= 5 -> 8000L
+        else -> 15000L
+    }
+
+    private fun uploadFile(
+        base0: String, sid: String, f: File, name: String, received: HashMap<String, Long>,
+        onEvent: ((TxEvent) -> Unit)? = null
+    ) {
         if (!f.exists()) throw Exception("手机上缺文件：$name")
+        var base = base0
         var attempt = 0
+        var netFails = 0
         while (true) {
             val local = f.length()
             val off = received[name] ?: 0L
             // v2.2：电脑上的字节数比手机原文件还大 = 旧版并发上传把分块重复追加了（2×3MiB 重复块），
             // 这时绝不能当作“已传完”跳过，否则坏文件永远留在电脑上、整段笔记一直缺。
             if (off > local) throw Exception("电脑上的 $name 比手机大（$off/${local} 字节，疑似传坏），请在「课堂记录」长按这一组选「重新上传素材」修复")
-            if (off >= local) return
+            if (off >= local) {
+                onEvent?.invoke(TxEvent(sid, name, local, local, 0, off, attempt, true))
+                return
+            }
             val end = minOf(off + CHUNK, local)
             val buf = ByteArray((end - off).toInt())
             RandomAccessFile(f, "r").use { it.seek(off); it.readFully(buf) }
             // 分块带 md5：传输/落盘损坏会被服务端当场打回重传（旧服务端忽略此参数）
             val md5 = MessageDigest.getInstance("MD5").digest(buf).joinToString("") { "%02x".format(it) }
-            val (code, text) = postBytes("$base/api/chunk?id=$sid&name=$name&offset=$off&md5=$md5", buf, 180000)
+            var code = -1
+            var text = ""
+            try {
+                val r = postBytes("$base/api/chunk?id=$sid&name=$name&offset=$off&md5=$md5", buf, 180000)
+                code = r.first
+                text = r.second
+            } catch (e: Exception) {
+                // v2.10：断线 / 被系统冻结 / 隧道抖一下，以前直接整段判失败（用户看到「重传中断」）。
+                // 现在当成一次可重试的尝试：退避后按服务端已收字节续传；局域网连挂两次就退回隧道。
+                netFails++
+                attempt++
+                val msg = e.message ?: "网络中断"
+                if (route == ROUTE_LAN && netFails >= 2) markLanBad()
+                onEvent?.invoke(TxEvent(sid, name, local, off, 0L, received[name] ?: off, attempt, false))
+                if (netFails >= 12) throw Exception("$name 连续 $netFails 次网络中断（$msg），已暂停等网络恢复")
+                Thread.sleep(backoffMs(netFails))
+                workingUrl()?.let { base = it }   // 线路可能换了，重试前重新解析一次
+                continue
+            }
+            netFails = 0
             when {
                 code == 200 -> {
                     try { received[name] = JSONObject(text).getLong("received") } catch (_: Exception) { }
+                    onEvent?.invoke(TxEvent(sid, name, local, off, buf.size.toLong(),
+                        received[name] ?: (off + buf.size), attempt, true))
                     attempt = 0
                 }
                 code == 409 -> {
                     // 服务端字节数与本地认知不一致：以服务端为准续传
                     try { received[name] = JSONObject(text).getLong("received") } catch (_: Exception) { }
+                    onEvent?.invoke(TxEvent(sid, name, local, off, buf.size.toLong(),
+                        received[name] ?: 0L, attempt, false, true))
                     attempt = 0
                 }
                 else -> {
                     attempt++
+                    onEvent?.invoke(TxEvent(sid, name, local, off, buf.size.toLong(),
+                        received[name] ?: 0L, attempt, false))
                     if (attempt >= 5) throw Exception("上传 $name 连续失败（HTTP $code）")
                     Thread.sleep(1500L * attempt)
                 }
             }
         }
+    }
+
+    // ---------- 重传后的整文件核对（2026-10-24 由测试版并入生产） ----------
+    data class VerifyFile(
+        val name: String, val clientSize: Long, val serverSize: Long, val exists: Boolean,
+        val sizeMatch: Boolean, val clientMd5: String, val serverMd5: String, val md5Match: Boolean,
+        val error: String = ""
+    )
+    data class VerifyResult(
+        val ok: Boolean, val allMatch: Boolean, val files: List<VerifyFile>,
+        val missing: List<String>, val extra: List<String>, val error: String?
+    )
+
+    /** 流式算整文件 MD5（64KB 一段，不整文件进内存） */
+    fun fileMd5(f: File): String {
+        val md = MessageDigest.getInstance("MD5")
+        f.inputStream().use { ins ->
+            val buf = ByteArray(64 * 1024)
+            while (true) {
+                val n = ins.read(buf)
+                if (n < 0) break
+                md.update(buf, 0, n)
+            }
+        }
+        return md.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    /** 把客户端每个文件的 size+md5 发给电脑，由电脑流式计算后逐项比对 */
+    fun verifySession(sid: String, files: List<File>): VerifyResult {
+        return try {
+            val url = workingUrl() ?: return VerifyResult(false, false, emptyList(), emptyList(), emptyList(), "连不上电脑（隧道没通/电脑关机）")
+            val arr = JSONArray()
+            for (f in files) {
+                if (!f.exists()) continue
+                arr.put(JSONObject().put("name", f.name).put("size", f.length()).put("md5", fileMd5(f)))
+            }
+            val (code, text) = http("$url/api/session/verify", "POST",
+                JSONObject().put("id", sid).put("files", arr).toString(), 120000)
+            if (code != 200) {
+                val msg = try { JSONObject(text).optString("error") } catch (_: Exception) { "HTTP $code" }
+                return VerifyResult(false, false, emptyList(), emptyList(), emptyList(), msg)
+            }
+            val j = JSONObject(text)
+            val out = ArrayList<VerifyFile>()
+            val fa = j.optJSONArray("files") ?: JSONArray()
+            for (i in 0 until fa.length()) {
+                val o = fa.getJSONObject(i)
+                out.add(VerifyFile(
+                    o.optString("name"), o.optLong("clientSize"), o.optLong("serverSize"),
+                    o.optBoolean("exists"), o.optBoolean("sizeMatch"),
+                    o.optString("clientMd5"), o.optString("serverMd5"), o.optBoolean("md5Match"),
+                    o.optString("error")
+                ))
+            }
+            VerifyResult(true, j.optBoolean("allMatch", false), out,
+                strList(j.optJSONArray("missing")), strList(j.optJSONArray("extra")), null)
+        } catch (e: Exception) {
+            VerifyResult(false, false, emptyList(), emptyList(), emptyList(), e.message ?: "校验失败")
+        }
+    }
+
+    private fun strList(a: JSONArray?): List<String> {
+        if (a == null) return emptyList()
+        val out = ArrayList<String>()
+        for (i in 0 until a.length()) out.add(a.optString(i))
+        return out
+    }
+
+    /** 查一节课的整理状态（结果页轮询用） */
+    fun noteState(sid: String): String? {
+        return try {
+            val url = workingUrl() ?: return null
+            val (code, text) = http("$url/api/note?id=$sid", timeout = 15000)
+            if (code != 200) null else JSONObject(text).optString("state")
+        } catch (_: Exception) { null }
     }
 
     // ---------- 课程页（v1.2） ----------
@@ -388,12 +617,18 @@ object Api {
     // ---------- 课程偏好（v1.6 例题汇总开关） ----------
     /** 把「哪些课要例题汇总」推给电脑（只推手机上明确设过的课，服务端按课合并）；
      *  失败返回 false 不抛——设置已存本地，下次同步会再推 */
-    fun pushCourseConfig(prefs: Map<String, Boolean>): Boolean {
+    fun pushCourseConfig(prefs: Map<String, Boolean>, terms: Map<String, String>? = null): Boolean {
         return try {
             val url = workingUrl() ?: return false
             val courses = JSONObject()
             for ((k, v) in prefs) courses.put(k, v)
-            val (code, _) = http("$url/api/course-config", "POST", JSONObject().put("courses", courses).toString(), 15000)
+            val body = JSONObject().put("courses", courses)
+            if (!terms.isNullOrEmpty()) {
+                val ts = JSONObject()
+                for ((k, v) in terms) ts.put(k, v)
+                body.put("terms", ts)
+            }
+            val (code, _) = http("$url/api/course-config", "POST", body.toString(), 15000)
             code == 200
         } catch (_: Exception) { false }
     }
@@ -406,6 +641,35 @@ object Api {
             if (v == "1" || v == "0") m[c] = v == "1"
         }
         return m
+    }
+
+    /** v2.8 课程术语（空格分隔的专业名词，供电脑转写当热词）：只推用户明确设过的课，
+     *  空串也推——服务端据此删掉该课术语（用户清空要能生效） */
+    fun termPrefs(): Map<String, String> {
+        val m = HashMap<String, String>()
+        for (c in Db.courses()) {
+            if (Db.meta("termsSet_$c") == "1") m[c] = Db.meta("terms_$c")
+        }
+        return m
+    }
+
+    // ---------- v2.8 课表 / 连接体检 ----------
+    /** 拉课表（电脑端 timetable.json）。失败返回 null，调用方保留旧缓存 */
+    fun timetable(): JSONObject? {
+        return try {
+            val url = workingUrl() ?: return null
+            val (code, text) = http("$url/api/timetable", timeout = 12000)
+            if (code == 200) JSONObject(text) else null
+        } catch (_: Exception) { null }
+    }
+
+    /** 连接体检：/api/health 汇总电脑端状态（模型、磁盘、笔记数、课表是否就位） */
+    fun health(): JSONObject? {
+        return try {
+            val url = workingUrl() ?: return null
+            val (code, text) = http("$url/api/health", timeout = 10000)
+            if (code == 200) JSONObject(text) else null
+        } catch (_: Exception) { null }
     }
 
     // ---------- 连接电脑（v2.0：同 WiFi 自动发现 / 手动输入地址，配对一次永久记住） ----------
@@ -456,12 +720,19 @@ object Api {
         } catch (_: Exception) { null }
     }
 
-    /** 连接并记住（发现/手动两条路共用）：拿配对信息验证可达后落库（pingOk 用的是本文件原有的探活函数） */
+    /** 连接并记住（发现/手动两条路共用）：拿配对信息验证可达后落库。
+     *  v2.13 开源版：默认 token 是占位符。若照旧「先探活再落库」，空白安装会带着占位 token
+     *  打 /api/ping 吃 401，导致第一次永远配不上。改为先临时装入本次下发的 token 再探活，
+     *  探通才落库；探不通回滚，不留脏凭证。 */
     fun connect(info: JSONObject): Boolean {
         val server = info.optString("server")
         if (server.isEmpty()) return false
-        if (!pingOk(server)) return false
-        saveCredentials(server, info.optString("token"), info.optString("topic"))
+        val token = info.optString("token")
+        val topic = info.optString("topic")
+        val prev = TOKEN
+        if (token.isNotEmpty()) TOKEN = token
+        if (!pingOk(server)) { TOKEN = prev; return false }
+        saveCredentials(server, token, topic)
         return true
     }
 
@@ -552,10 +823,17 @@ object Api {
         } catch (_: Exception) { }
         if (notes > 0) parts.add("更新 $notes 份笔记")
 
-        // 3) 课程设置（例题汇总开关）顺手推给电脑：手机本地是真相源，失败不报错下次再推
+        // 3) 课程设置（例题汇总开关 / v2.8 课程术语）顺手推给电脑：手机本地是真相源，失败不报错下次再推
         try {
             val prefs = examplePrefs()
-            if (prefs.isNotEmpty()) pushCourseConfig(prefs)
+            val terms = termPrefs()
+            if (prefs.isNotEmpty() || terms.isNotEmpty()) pushCourseConfig(prefs, terms)
+        } catch (_: Exception) { }
+
+        // 3b) v2.8 课表：每轮同步顺手拉一次（JSON 只有几 KB），保证「今天/下一节」卡是最新的
+        try {
+            val t = timetable()
+            if (t != null) Timetable.save(ctx, t)
         } catch (_: Exception) { }
 
         // 4) 本地勾掉的待办补推（v1.7：断网时记手机的勾选，连上电脑这里补上）
@@ -614,6 +892,9 @@ object Api {
             val dir = File(File(ctx.filesDir, "notes"), sid).apply { mkdirs() }
             val html = j.optString("html")
             if (html.isNotEmpty()) File(dir, "note.html").writeText(html, Charsets.UTF_8)
+            // v2.8 导出：Markdown 原文一并落地，离线也能分享/复制
+            val md = j.optString("md")
+            if (md.isNotEmpty()) File(dir, "note.md").writeText(md, Charsets.UTF_8)
             val photos = j.optJSONArray("photos") ?: JSONArray()
             for (i in 0 until photos.length()) {
                 val name = photos.getJSONObject(i).optString("name")
@@ -656,6 +937,67 @@ object Api {
         return local < expect
     }
 
+    // ---------- 原始素材（v2.6：录音/原文/照片） ----------
+    /** 拉一节课的原始素材元数据 + 逐句转写（只读）。失败返回 null，调用方用本地缓存兜底 */
+    fun source(base: String, sid: String): JSONObject? {
+        return try {
+            val (code, text) = http("$base/api/source?id=$sid", timeout = 25000)
+            if (code != 200) return null
+            val j = JSONObject(text)
+            if (j.optBoolean("ok", false)) j else null
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun sourceCacheFile(ctx: android.content.Context, sid: String) =
+        File(File(ctx.filesDir, "source"), "$sid.json")
+
+    /** 原文/分段清单落本地：断网时还能看上次拉到的原文 */
+    fun saveSourceCache(ctx: android.content.Context, sid: String, j: JSONObject) {
+        try {
+            val f = sourceCacheFile(ctx, sid)
+            f.parentFile?.mkdirs()
+            f.writeText(j.toString(), Charsets.UTF_8)
+        } catch (_: Exception) { }
+    }
+
+    fun cachedSource(ctx: android.content.Context, sid: String): JSONObject? = try {
+        val f = sourceCacheFile(ctx, sid)
+        if (!f.exists() || f.length() == 0L) null else JSONObject(f.readText(Charsets.UTF_8))
+    } catch (_: Exception) { null }
+
+    /** 素材文件直链。MediaPlayer 加不了请求头，token 只能走查询参数（服务端已支持）。
+     *  srcId：同日合并的成员段与锚点段同名（recording_00.m4a…），必须带上才知道取哪一份。 */
+    fun fileUrl(base: String, sid: String, name: String, srcId: String = ""): String {
+        val e = { s: String -> java.net.URLEncoder.encode(s, "UTF-8").replace("+", "%20") }
+        val src = if (srcId.isEmpty()) "" else "&src=${e(srcId)}"
+        return "$base/api/file?id=${e(sid)}&name=${e(name)}$src&token=${e(TOKEN)}"
+    }
+
+    fun fileBytes(url: String, timeout: Int = 60000): ByteArray? = try {
+        val (code, data) = getBytes(url, timeout)
+        if (code in 200..299) data else null
+    } catch (_: Exception) { null }
+
+    /** 把电脑上的原图下到本地缓存（本机没有这张时用），返回缓存文件 */
+    fun cachePhoto(ctx: android.content.Context, base: String, sid: String, name: String, srcId: String = ""): File? {
+        val safe = name.replace("\\", "_").replace("/", "_")
+        if (safe.isEmpty()) return null
+        val dir = File(File(ctx.filesDir, "source-photos"), sid)
+        val f = File(dir, safe)
+        if (f.exists() && f.length() > 0L) return f
+        val data = fileBytes(fileUrl(base, sid, name, srcId)) ?: return null
+        if (data.isEmpty()) return null
+        return try {
+            dir.mkdirs()
+            val tmp = File(dir, "$safe.part")
+            tmp.writeBytes(data)
+            if (!tmp.renameTo(f)) return null
+            f
+        } catch (_: Exception) { null }
+    }
+
     // ---------- 自动上传策略（v2.0 设置页） ----------
     /** auto=连上就传（默认）；wifi=仅 WiFi；manual=不自动传（「笔记」页点课堂记录手动传） */
     fun autoUploadAllowed(ctx: android.content.Context): Boolean = when (Db.meta("autoUpload", "auto")) {
@@ -674,4 +1016,36 @@ object Api {
             true   // 判不出来时按可传处理，别把该传的卡死
         }
     }
+
+    // ---------- 学习通（v2.11，全程只读：作业/通知/考试/任务点） ----------
+    /** 电脑端转发到本机 sidecar；null=连不上电脑。出错时也尽量把服务端的人话错误带回来 */
+    private fun cxJson(path: String, method: String = "GET", timeout: Int = 25000): JSONObject? {
+        return try {
+            val url = workingUrl() ?: return null
+            val body = if (method == "POST") "{}" else null
+            val (_, text) = http("$url$path", method, body, timeout)
+            if (text.isBlank()) return null
+            try { JSONObject(text) } catch (_: Exception) { null }
+        } catch (_: Exception) { null }
+    }
+
+    /** 登录态 + 姓名/学校（sidecar 会顺手拉资料） */
+    fun cxStatus(): JSONObject? = cxJson("/api/chaoxing/status", timeout = 25000)
+
+    /** 让电脑生成二维码并在浏览器弹出；返回 {loginUrl,state,message} */
+    fun cxLoginStart(): JSONObject? = cxJson("/api/chaoxing/login/start", "POST", 45000)
+
+    /** 轮询扫码进度：state=waiting/scanned/success/expired/failed */
+    fun cxLoginStatus(): JSONObject? = cxJson("/api/chaoxing/login/status", timeout = 12000)
+
+    /** 四类数据汇总；force=true 强制重拉（默认读电脑端 5 分钟缓存）。
+     *  首次调用通常立刻返回 state=loading，随后轮询同一接口拿结果 */
+    fun cxSummary(force: Boolean = false): JSONObject? =
+        cxJson("/api/chaoxing/summary" + if (force) "?force=1" else "", timeout = 20000)
+
+    /** 退出学习通登录（电脑端会先备份 cookie 再清空） */
+    fun cxLogout(): JSONObject? = cxJson("/api/chaoxing/logout", "POST", 20000)
+
+    /** 学习通要验证码时：让电脑浏览器弹出验证页（用户亲手输入） */
+    fun cxOpenVerify(): JSONObject? = cxJson("/api/chaoxing/verify/open", "POST", 12000)
 }

@@ -1,6 +1,7 @@
 package com.hxt.classnotes
 
 import android.app.Activity
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
@@ -44,7 +45,11 @@ class PhotoActivity : Activity() {
         super.onCreate(savedInstanceState)
         sid = intent.getStringExtra("sid") ?: ""
         idx = intent.getIntExtra("index", 0)
-        photos = Db.photos(sid)
+        // v2.6：原始素材页会传一份跨会话聚合过的照片清单（同日同课合并后，照片不全在 sid 目录）
+        val listJson = intent.getStringExtra("photosJson")
+        photos = if (!listJson.isNullOrEmpty()) {
+            try { JSONArray(listJson) } catch (_: Exception) { Db.photos(sid) }
+        } else Db.photos(sid)
 
         val root = LinearLayout(this)
         root.orientation = LinearLayout.VERTICAL
@@ -73,6 +78,22 @@ class PhotoActivity : Activity() {
         nav.addView(prev)
         nav.addView(next)
         root.addView(nav)
+
+        // v2.6：从原始素材页进来时，给一个「跳到录音这里」的出口
+        if (intent.getBooleanExtra("seekEnabled", false)) {
+            val jump = Ui.button(this, "🎧 跳到录音这里", true)
+            val jlp = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            jlp.setMargins(Ui.dp(16), 0, Ui.dp(16), Ui.dp(18))
+            jump.layoutParams = jlp
+            jump.setOnClickListener {
+                val off = if (photos.length() > 0) photos.optJSONObject(idx)?.optLong("offsetMs") ?: 0L else 0L
+                setResult(RESULT_OK, Intent().putExtra("seekMs", off))
+                finish()
+            }
+            root.addView(jump)
+        }
 
         setContentView(root)
 

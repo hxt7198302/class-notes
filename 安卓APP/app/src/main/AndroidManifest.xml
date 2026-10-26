@@ -8,6 +8,8 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- v2.9 上传前台服务：dataSync 类型（Android 14 起必须单独声明此权限，否则 startForeground 抛异常） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
@@ -46,7 +48,17 @@
             android:exported="false" />
 
         <activity
+            android:name=".SourceActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+
+        <activity
             android:name=".CourseActivity"
+            android:exported="false" />
+
+        <!-- v2.11 学习通（只读）：入口在「课程与作业」页顶部卡片 -->
+        <activity
+            android:name=".ChaoxingActivity"
             android:exported="false" />
 
         <activity
@@ -62,6 +74,14 @@
             android:process=":rec"
             android:stopWithTask="false"
             android:foregroundServiceType="microphone" />
+
+        <!-- v2.9 上传前台服务：上传期间把进程钉在前台，切后台/息屏不再被系统冻结；
+             stopWithTask=false：从最近任务划掉 APP 也把手上这一节传完 -->
+        <service
+            android:name=".Sync"
+            android:exported="false"
+            android:stopWithTask="false"
+            android:foregroundServiceType="dataSync" />
 
         <!-- 录音看门狗：进程被系统杀后由系统闹钟叫醒，发「录音中断」高优通知 -->
         <receiver

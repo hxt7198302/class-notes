@@ -18,6 +18,7 @@ class App : Application() {
     override fun onCreate() {
         super.onCreate()
         Db.init(this)
+        Api.initCtx(this)   // v2.9：上传保活服务需要 Context
         val prev = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { t, e ->
             try {

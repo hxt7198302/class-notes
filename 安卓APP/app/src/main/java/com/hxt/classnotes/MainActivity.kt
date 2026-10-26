@@ -1,4 +1,4 @@
-﻿package com.hxt.classnotes
+package com.hxt.classnotes
 
 import android.Manifest
 import android.app.Activity
@@ -46,6 +46,7 @@ class MainActivity : Activity() {
     private lateinit var updateBtn: Button
     private lateinit var photoScroll: HorizontalScrollView
     private lateinit var photoStrip: LinearLayout
+    private lateinit var ttBox: LinearLayout   // v2.8 「今天/下一节」卡内容（每次刷新重建）
 
     // 笔记页
     private var notesView: NotesView? = null
@@ -95,6 +96,8 @@ class MainActivity : Activity() {
         if (!RecInfo.recording()) selectedCourse = Db.meta("lastCourse", "")
         refresh()
         refreshPhotos()
+        handler.removeCallbacks(ttTicker)
+        handler.post(ttTicker)
         asyncSync()
         // v2.3：更新后自动体检电脑上的损坏录音并补传（每个版本只自动跑一次，失败下次启动再试）
         Repair.autoCheck(this) { asyncSync(); refresh() }
@@ -226,6 +229,13 @@ class MainActivity : Activity() {
         head.addView(verRow)
         box.addView(head)
 
+        // v2.8 课表卡：今天上什么 / 下一节几点（位置在标题下、课程选择上；细节课表先不做）
+        val ttCard = Ui.card(this)
+        ttBox = LinearLayout(this)
+        ttBox.orientation = LinearLayout.VERTICAL
+        ttCard.addView(ttBox)
+        box.addView(ttCard)
+
         // 课程选择
         val courseCard = Ui.card(this)
         courseCard.addView(Ui.text(this, "上哪门课？", 15, Ui.TEXT, true))
@@ -274,6 +284,172 @@ class MainActivity : Activity() {
             11, Ui.TEXT_SUB).apply { setPadding(Ui.dp(8), Ui.dp(10), Ui.dp(8), Ui.dp(4)) })
 
         return pageScrollWrap(box)
+    }
+
+    // ---------- v2.8 课表卡：今天/下一节 ----------
+    private val ttTicker = object : Runnable {
+        override fun run() {
+            renderTimetable()
+            handler.postDelayed(this, 30_000)
+        }
+    }
+
+    private fun renderTimetable() {
+        if (!::ttBox.isInitialized) return
+        ttBox.removeAllViews()
+        val tt = Timetable.loadCached(this)
+        if (tt == null) {
+            ttBox.addView(Ui.text(this, "📅 课表还没同步", 15, Ui.TEXT, true))
+            ttBox.addView(Ui.text(this, "连上家里电脑会自动拉；也可以点这里重试。", 12, Ui.TEXT_SUB))
+            ttBox.setOnClickListener { retryTimetable() }
+            return
+        }
+        val st = Timetable.now(tt)
+        val today = java.time.LocalDate.now()
+        val head = Ui.text(this,
+            "📅 ${Timetable.dayLabel(today)} · 第${st.week.coerceIn(1, tt.totalWeeks)}周 · ${tt.semesterName}",
+            12, Ui.TEXT_SUB)
+        ttBox.addView(head)
+
+        val c = st.course
+        val title = when (st.kind) {
+            "now" -> "🟢 正在上 · ${c?.name ?: ""}"
+            "next" -> {
+                val d = st.date
+                val prefix = if (d != null && d != today) "${Timetable.dayLabel(d)} " else ""
+                "⏭ 下一节 · ${c?.name ?: ""}" + if (prefix.isNotEmpty()) "（$prefix）" else ""
+            }
+            else -> "🌙 今天的课都上完了"
+        }
+        ttBox.addView(Ui.text(this, title, 17, if (st.kind == "now") Ui.GREEN else Ui.PRIMARY, true)
+            .apply { setPadding(0, Ui.dp(3), 0, 0) })
+
+        if (c != null) {
+            val room = if (c.room.isNotEmpty()) " · ${c.room}" else ""
+            val detail = when (st.kind) {
+                "now" -> "${Timetable.periodText(c)} ${Timetable.timeText(st.start, st.end)}$room · 还剩 ${st.mins} 分钟"
+                else -> "${Timetable.timeText(st.start, st.end)}$room · ${agoText(st.mins)}开始"
+            }
+            ttBox.addView(Ui.text(this, detail, 13, Ui.TEXT_SUB).apply { setPadding(0, Ui.dp(2), 0, 0) })
+            if (st.kind == "now") ttBox.addView(progressBar(st.progress))
+        } else {
+            ttBox.addView(Ui.text(this, "好好休息，或提前看看笔记。", 13, Ui.TEXT_SUB).apply { setPadding(0, Ui.dp(2), 0, 0) })
+        }
+
+        val weekCount = weekCourses(tt).size
+        val more = Ui.text(this, "本周 $weekCount 节课 · 点这里看本周课程", 12, Ui.PRIMARY)
+        more.setPadding(0, Ui.dp(8), 0, 0)
+        ttBox.addView(more)
+        ttBox.setOnClickListener { showWeekCourses(tt) }
+    }
+
+    private fun agoText(mins: Long): String = when {
+        mins <= 0 -> "马上"
+        mins < 60 -> "$mins 分钟后"
+        else -> "${mins / 60} 小时${if (mins % 60 > 0) " ${mins % 60} 分钟" else ""}后"
+    }
+
+    /** 细进度条：剩余/已过按权重分两段，避免引入 ProgressBar 样式适配 */
+    private fun progressBar(p: Float): View {
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.setPadding(0, Ui.dp(6), 0, 0)
+        val left = View(this).apply { background = Ui.roundBg(Ui.GREEN, 3) }
+        val right = View(this).apply { background = Ui.roundBg(Ui.LINE, 3) }
+        row.addView(left, LinearLayout.LayoutParams(0, Ui.dp(6), p.coerceIn(0.02f, 1f)))
+        row.addView(right, LinearLayout.LayoutParams(0, Ui.dp(6), (1f - p).coerceIn(0.02f, 1f)))
+        return row
+    }
+
+    private fun weekCourses(tt: Timetable.TT): List<Timetable.Course> {
+        val week = Timetable.weekOf(tt, java.time.LocalDate.now())
+        return tt.courses.filter { week in it.startWeek..it.endWeek }.sortedWith(compareBy({ it.weekday }, { it.start }))
+    }
+
+    private fun showWeekCourses(tt: Timetable.TT) {
+        val sb = StringBuilder()
+        val names = arrayOf("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+        for (wd in 1..7) {
+            val cs = weekCourses(tt).filter { it.weekday == wd }
+            if (cs.isEmpty()) continue
+            sb.append(names[wd - 1]).append("\n")
+            for (c in cs) {
+                val sp = Timetable.span(tt, c)
+                val t = Timetable.timeText(sp?.first, sp?.second)
+                sb.append("  ").append(t).append("  ").append(c.name)
+                if (c.room.isNotEmpty()) sb.append(" · ").append(c.room)
+                sb.append("\n")
+            }
+        }
+        if (sb.isEmpty()) sb.append("本周没有课（可能还没开学或学期已结束）")
+        AlertDialog.Builder(this)
+            .setTitle("本周课程 · ${Timetable.dayLabel(java.time.LocalDate.now())}")
+            .setMessage(sb.toString().trimEnd())
+            .setPositiveButton("好", null)
+            .setNeutralButton("刷新课表") { _, _ -> retryTimetable() }
+            .show()
+    }
+
+    private fun retryTimetable() {
+        Ui.toast(this, "正在从电脑拉课表…")
+        Thread {
+            val t = try { Api.timetable() } catch (_: Exception) { null }
+            if (t != null) Timetable.save(this, t)
+            handler.post {
+                if (isFinishing || isDestroyed) return@post
+                renderTimetable()
+                Ui.toast(this, if (t != null) "课表已更新" else "没拉到：确认电脑端在运行、手机能连上")
+            }
+        }.start()
+    }
+
+    // ---------- v2.8 连接体检 ----------
+    private fun runHealthCheck() {
+        val dlg = AlertDialog.Builder(this)
+            .setTitle("🩺 连接体检")
+            .setMessage("体检中…（最多十几秒）")
+            .setPositiveButton("关闭", null)
+            .create()
+        dlg.show()
+        Thread {
+            val sb = StringBuilder()
+            val base = try { Api.workingUrl() } catch (_: Exception) { null }
+            if (base == null) {
+                sb.append("❌ 连不上电脑\n")
+                sb.append("• 电脑端没开 / 不在同一 WiFi / 隧道断了\n")
+                sb.append("• 去「连接电脑」重新配一次，或等电脑端自动广播\n\n")
+            } else {
+                sb.append("✅ 已连上电脑\n").append(base).append("\n\n")
+                val h = try { Api.health() } catch (_: Exception) { null }
+                if (h == null) {
+                    sb.append("⚠️ 服务器在线，但 /api/health 没响应（电脑端版本旧？）\n\n")
+                } else {
+                    sb.append("• 版本/服务：").append(h.optString("name", "class-notes-api")).append("\n")
+                    sb.append("• 转写模型：").append(h.optString("model", "?")).append("（语言 ").append(h.optString("lang", "zh")).append("）\n")
+                    val free = h.optLong("diskFree", -1L)
+                    val total = h.optLong("diskTotal", -1L)
+                    if (free >= 0 && total > 0) {
+                        sb.append("• 电脑磁盘：剩 ").append(String.format("%.1f", free / 1073741824.0))
+                            .append(" GB / 共 ").append(String.format("%.0f", total / 1073741824.0)).append(" GB")
+                            .append(if (free < 3L * 1073741824L) "  ⚠️ 空间偏少" else "").append("\n")
+                    }
+                    sb.append("• 电脑上的笔记：").append(h.optInt("noteDirs", 0)).append(" 份\n")
+                    sb.append("• 课表文件：").append(if (h.optBoolean("timetable")) "✅ 就位" else "❌ 没有（电脑端 timetable.json）").append("\n\n")
+                }
+            }
+            val pending = try { Db.readySessions().size } catch (_: Exception) { 0 }
+            sb.append("📱 手机这边\n")
+            sb.append("• 待上传录音：").append(pending).append(" 节")
+            sb.append(if (pending > 0 && Db.meta("autoUpload", "auto") == "manual") "（手动模式，去「笔记」页传）" else "").append("\n")
+            val tt = Timetable.loadCached(this)
+            sb.append("• 课表缓存：").append(if (tt == null) "没有（连上电脑自动拉）" else "有，第 ${Timetable.weekOf(tt, java.time.LocalDate.now())} 周").append("\n")
+            val notes = try { Db.noteCacheList().length() } catch (_: Exception) { 0 }
+            sb.append("• 已缓存笔记：").append(notes).append(" 份\n")
+            sb.append("• 当前版本：v").append(Upd.VERSION_NAME).append("\n\n")
+            if (base != null) sb.append("结论：链路正常。连不上时先看这里哪一项变红。")
+            else sb.append("结论：先把电脑端打开、确认手机和电脑在同一个网络。")
+            handler.post { if (!isFinishing && !isDestroyed) dlg.setMessage(sb.toString()) }
+        }.start()
     }
 
     // ---------- 设置页 ----------
@@ -366,12 +542,18 @@ class MainActivity : Activity() {
         pairBtn.setOnClickListener { startActivity(Intent(this, PairActivity::class.java)) }
         connCard.addView(pairBtn)
         connCard.addView(Ui.text(this, if (Api.paired()) "当前：已连接你的电脑" else "当前：还没配对（同一 WiFi 下可一键自动找电脑）", 11, Ui.TEXT_SUB))
+
+        // v2.8 连接体检：一眼看出「连不上」到底卡在哪（手机→电脑→模型/磁盘/课表）
+        val healthBtn = Ui.button(this, "🩺 连接体检", false)
+        healthBtn.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).also { it.topMargin = Ui.dp(8) }
+        healthBtn.setOnClickListener { runHealthCheck() }
+        connCard.addView(healthBtn)
         box.addView(connCard)
 
         // 更新与关于
         val upCard = Ui.card(this)
         upCard.addView(Ui.text(this, "🔄 更新与关于", 15, Ui.TEXT, true))
-        upCard.addView(Ui.text(this, "出品方：阿泰与朝瑞（ACC 2026 黑客松参赛作品）", 11, Ui.TEXT_SUB))
+        upCard.addView(Ui.text(this, "出品方：阿泰与朝瑞（开源版）", 11, Ui.TEXT_SUB))
         val checkBtn = Ui.button(this, "检查更新（当前 v" + Upd.VERSION_NAME + "）", false)
         checkBtn.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).also { it.topMargin = Ui.dp(6) }
         checkBtn.setOnClickListener { Upd.checkNow(this) }
@@ -431,6 +613,7 @@ class MainActivity : Activity() {
     // ---------- 数据刷新 ----------
     private fun refresh() {
         refreshCourses()
+        renderTimetable()
         if (currentTab == 1) notesView?.refresh()
         updateRecUi()
     }
@@ -776,6 +959,7 @@ class MainActivity : Activity() {
     override fun onPause() {
         super.onPause()
         handler.removeCallbacks(ticker)
+        handler.removeCallbacks(ttTicker)
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
