@@ -1,6 +1,7 @@
 ﻿# Append a sanitized package under a subdirectory of the repository, optionally prepending a
 # pointer to the root README. Same flow as github-publish.ps1: frozen base SHA, temporary
-# worktree, new branch, draft PR. The base branch is never written to and no ref is forced.
+# worktree, new branch, draft PR. The base branch is never written to and no existing ref is
+# overwritten.
 #
 # Default is a dry run: prints the manifest and the README pointer preview, no network.
 # Add -Apply -Branch <name> to create the branch and open the PR.
@@ -69,6 +70,7 @@ $baseSha = Get-RemoteBranchSha -RepoRoot $repoFull -Branch $BaseBranch
 Write-Output "BASE_FROZEN $BaseBranch $baseSha"
 Confirm-BaseCommitLocal -RepoRoot $repoFull -BaseSha $baseSha -BaseBranch $BaseBranch
 if (Test-RemoteBranchExists -RepoRoot $repoFull -Branch $Branch) {
+    # Early, friendly error only. The atomic guard is the empty-expect lease in Push-NewBranch.
     throw "BRANCH_EXISTS: '$Branch' already exists; pick another name or delete it yourself"
 }
 
@@ -76,7 +78,7 @@ $wt = Join-Path $env:TEMP ('publish-merge-' + [guid]::NewGuid().ToString('N'))
 $null = Initialize-PublishWorktree -RepoRoot $repoFull -BaseSha $baseSha -Path $wt
 try {
     $target = Join-Path $wt ($prefix -replace '/', '\')
-    Copy-PublishItems -Items $items -TargetFull $target
+    Copy-PublishItems -Items $items -TargetFull $target -TargetRoot $wt
 
     if (-not $NoReadmePointer) {
         # Read the README from the same frozen SHA, not from whatever the default branch has.
@@ -85,7 +87,9 @@ try {
         if ($readme -match '合并版快照') {
             Write-Output 'README_POINTER_ALREADY_THERE'
         } else {
-            [IO.File]::WriteAllText((Join-Path $wt 'README.md'), ($pointer + $readme), (New-Object Text.UTF8Encoding($false)))
+            $readmePath = Join-Path $wt 'README.md'
+            Assert-NoLinksUnderRoot -Path $readmePath -RootFull $wt
+            [IO.File]::WriteAllText($readmePath, ($pointer + $readme), (New-Object Text.UTF8Encoding($false)))
             Write-Output 'README_POINTER_ADDED'
         }
     }
@@ -101,7 +105,7 @@ try {
     Write-Output $stat.Text
 
     $null = Invoke-Git -RepoRoot $wt -GitArgs @('commit', '-m', $CommitMessage)
-    $push = Invoke-Git -RepoRoot $wt -GitArgs @('push', '-u', 'origin', $Branch)
+    $push = Push-NewBranch -RepoRoot $wt -Branch $Branch
     Write-Output $push.Text
 
     if (-not $PrTitle) { $PrTitle = $CommitMessage }

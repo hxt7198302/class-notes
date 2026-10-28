@@ -52,12 +52,15 @@ if (-not $Apply) {
 }
 
 Assert-GhReady
+$prev = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
 Push-Location -LiteralPath $repoFull
 try {
     $out = & gh @ghArgs 2>&1
     $code = $LASTEXITCODE
 } finally {
     Pop-Location
+    $ErrorActionPreference = $prev
 }
 if ($code -ne 0) {
     throw ("GH_RELEASE_CREATE_FAILED: " + ((@($out) | ForEach-Object { "$_" }) -join "`n"))

@@ -57,14 +57,14 @@ git ls-remote --heads origin <分支名>
 gh pr view <编号> --json isDraft,state,headRefOid,baseRefName
 ```
 
-自测覆盖：子目录参数、凭据文件名、发布目录范围、清单相对路径、冻结 blob 读取、`-Root` 为 junction、祖先为 junction、树内子目录为 junction（临时 junction 构造，离线），以及 `gh` 缺失时的报错路径。
+自测覆盖：子目录参数、凭据文件名、发布目录范围、清单相对路径、冻结 blob 读取、`-Root` 为 junction、祖先为 junction、树内子目录为 junction、隐藏目录内 junction、目标目录/祖先/目标文件/根 README 已存在链接、仓库路径含空格、并发建分支被拒且远端 SHA 不变（临时 junction 与本地 bare 仓库构造，离线），以及 `gh` 缺失时的报错路径。
 
 ## 安全约束
 
 1. **不写基准分支。** 只推新分支、开草稿 PR；目标分支已存在直接报错，不覆盖。
 2. **基准只冻结一次。** 每次 `-Apply` 先取一次远端基准 SHA，worktree、README 读取、提交父节点都用这枚 SHA；运行中基准前移不混用。
-3. **不强制更新引用。** 无 force 参数，不 PATCH 任何分支。
-4. **链接与路径前置拒绝。** `-Root` 本身、到仓库根的每级祖先、树内每个目录/文件，凡带 ReparsePoint 一律拒绝；`-Subdir` 拒绝盘符、`..`、`.`、空段与 `.git`。
+3. **分支只创建、不覆盖。** 推送用空旧值 lease（`--force-with-lease=refs/heads/<分支>:`），仅当远端不存在该引用才原子创建；不使用无条件 force，也不靠推送前的那次查询保证安全。
+4. **链接与路径前置拒绝。** 来源侧：`-Root` 本身、到仓库根的每级祖先、树内每个目录/文件（含隐藏项），凡带 ReparsePoint 一律拒绝，且检查与清单共用同一份枚举；目标侧：冻结 worktree 内目标目录、每级祖先、每个目标文件（含基准里已有的链接）同样拒绝；`-Subdir` 拒绝盘符、`..`、`.`、空段与 `.git`。
 5. **凭据文件拦截。** `.env*`、`*.pem/*.pfx/*.p12/*.keystore/*.jks/*.key/*.ppk`、`id_rsa*`、`.netrc`、`.npmrc`、`credentials.json` 默认拦下。
 6. **默认 dry-run、默认草稿。** 不加 `-Apply` 不联网；PR 与 Release 都先建草稿。
 7. **缺工具只报错。** 未安装 `gh` 时报 `GH_NOT_FOUND`，不自动安装或升级系统依赖。

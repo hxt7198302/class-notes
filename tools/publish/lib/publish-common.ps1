@@ -2,7 +2,9 @@
 #
 # Flow: freeze the base SHA once, stage files in a git worktree, commit and push a new
 # branch, then open a draft PR with the GitHub CLI. There is no direct GitHub object/API
-# layer here, and no code path writes to the base branch or forces a ref.
+# layer here, and no code path writes to the base branch or force-updates a ref (the new
+# branch is pushed with an empty-expect --force-with-lease, which only succeeds if it does
+# not exist yet).
 #
 # Nothing in the dry-run path touches the network.
 
@@ -24,13 +26,21 @@ function Get-PublishRepoRoot {
 }
 
 function Invoke-Git {
+    # Native stderr (push progress, warnings) is data here, not a terminating error, even when
+    # the caller runs with $ErrorActionPreference = 'Stop'.
     param(
         [Parameter(Mandatory)][string]$RepoRoot,
         [Parameter(Mandatory)][string[]]$GitArgs,
         [switch]$AllowFail
     )
-    $out = & git -C $RepoRoot @GitArgs 2>&1
-    $code = $LASTEXITCODE
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $out = & git -C $RepoRoot @GitArgs 2>&1
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prev
+    }
     $lines = @($out | ForEach-Object { "$_" })
     $text = $lines -join "`n"
     if ($code -ne 0 -and -not $AllowFail) {
@@ -61,18 +71,77 @@ function Assert-NoLinkChain {
     }
 }
 
-function Assert-NoLinksInTree {
+function Get-PublishFileSet {
+    # The single enumeration used by both the link check and the manifest, so the checked set
+    # and the copied set can never drift (hidden entries included, hence -Force on both).
     # Directories first: a junction subdirectory is rejected before its contents are read.
-    # Scope is exactly: every directory and file under -Root (plus the root chain above).
     param([Parameter(Mandatory)][string]$RootFull)
     foreach ($d in Get-ChildItem -LiteralPath $RootFull -Recurse -Force -Directory) {
         if ($d.Attributes -band [IO.FileAttributes]::ReparsePoint) {
             throw "LINK_IN_TREE: '$($d.FullName)' is a junction/symlink directory (it can point outside the publish root)"
         }
     }
-    foreach ($f in Get-ChildItem -LiteralPath $RootFull -Recurse -File) {
+    $files = @(Get-ChildItem -LiteralPath $RootFull -Recurse -Force -File)
+    foreach ($f in $files) {
         if ($f.Attributes -band [IO.FileAttributes]::ReparsePoint) {
             throw "SYMLINK_IN_TREE: '$($f.FullName)' is a junction/symlink file"
+        }
+    }
+    return $files
+}
+
+function Assert-NoLinksInTree {
+    param([Parameter(Mandatory)][string]$RootFull)
+    $null = Get-PublishFileSet -RootFull $RootFull
+}
+
+function Get-TargetEntry {
+    # Returns the directory entry itself, without following a reparse point. Listing the parent
+    # is the only way to see a link whose target is missing (which would still be written
+    # through); $null means the entry does not exist yet.
+    param([Parameter(Mandatory)][string]$Path)
+    $parent = Split-Path -Parent $Path
+    $leaf = Split-Path -Leaf $Path
+    if (-not $parent) { return $null }
+    if (-not [IO.Directory]::Exists($parent)) { return $null }
+    return @(Get-ChildItem -LiteralPath $parent -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -eq $leaf } | Select-Object -First 1)
+}
+
+function Assert-NoLinksUnderRoot {
+    # Target side of the copy: the frozen base may already carry a link (git mode 120000) at
+    # the destination, so every existing component between -RootFull and -Path gets the same
+    # ReparsePoint rule as the source tree. No path resolution is re-implemented here.
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$RootFull
+    )
+    $root = [IO.Path]::GetFullPath($RootFull).TrimEnd('\', '/')
+    $p = [IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
+    $inside = $p.Equals($root, [StringComparison]::OrdinalIgnoreCase) -or
+              $p.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase) -or
+              $p.StartsWith($root + '/', [StringComparison]::OrdinalIgnoreCase)
+    if (-not $inside) { throw "TARGET_OUTSIDE_WORKTREE: '$p' is not under '$root'" }
+
+    $segments = @()
+    if (-not $p.Equals($root, [StringComparison]::OrdinalIgnoreCase)) {
+        $segments = @($p.Substring($root.Length).TrimStart('\', '/').Split([char[]]('\', '/')) | Where-Object { $_ })
+    }
+
+    $cur = $root
+    $rootItem = Get-TargetEntry -Path $cur
+    if ($rootItem -and ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "LINK_IN_TARGET_CHAIN: '$cur' is a junction/symlink; refusing to write through it"
+    }
+    for ($i = 0; $i -lt $segments.Count; $i++) {
+        $cur = Join-Path $cur $segments[$i]
+        $item = Get-TargetEntry -Path $cur
+        if (-not $item) { break }
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "LINK_IN_TARGET_CHAIN: '$cur' is a junction/symlink; refusing to write through it"
+        }
+        if ($i -lt $segments.Count - 1 -and -not $item.PSIsContainer) {
+            throw "TARGET_PARENT_NOT_DIRECTORY: '$cur' exists and is not a directory"
         }
     }
 }
@@ -130,12 +199,12 @@ function Test-SensitiveName {
 
 function Get-PublishManifest {
     param([Parameter(Mandatory)][string]$RootFull)
-    Assert-NoLinksInTree -RootFull $RootFull
+    $files = Get-PublishFileSet -RootFull $RootFull
 
     $items = New-Object System.Collections.ArrayList
     Push-Location -LiteralPath $RootFull
     try {
-        foreach ($f in Get-ChildItem -LiteralPath $RootFull -Recurse -Force -File) {
+        foreach ($f in $files) {
             $rel = Resolve-Path -LiteralPath $f.FullName -Relative
             if ($rel.StartsWith('.\')) { $rel = $rel.Substring(2) }
             $rel = $rel.Replace('\', '/')
@@ -231,10 +300,18 @@ function Remove-PublishWorktree {
 }
 
 function Copy-PublishItems {
-    param($Items, [Parameter(Mandatory)][string]$TargetFull)
+    # -TargetRoot is the frozen worktree root; every destination component is checked there
+    # before writing, so a link already present in the base cannot redirect the copy.
+    param(
+        $Items,
+        [Parameter(Mandatory)][string]$TargetFull,
+        [Parameter(Mandatory)][string]$TargetRoot
+    )
+    Assert-NoLinksUnderRoot -Path $TargetFull -RootFull $TargetRoot
     if (-not (Test-Path -LiteralPath $TargetFull)) { $null = New-Item -ItemType Directory -Path $TargetFull -Force }
     foreach ($it in @($Items)) {
         $dest = Join-Path $TargetFull ($it.RelPath -replace '/', '\')
+        Assert-NoLinksUnderRoot -Path $dest -RootFull $TargetRoot
         $parent = Split-Path -Parent $dest
         if (-not (Test-Path -LiteralPath $parent)) { $null = New-Item -ItemType Directory -Path $parent -Force }
         Copy-Item -LiteralPath $it.FullName -Destination $dest -Force
@@ -243,16 +320,36 @@ function Copy-PublishItems {
 
 function Get-GitBlobBytes {
     # Reads a blob exactly as stored (binary-safe), e.g. "<sha>:README.md".
+    # -WorkingDirectory carries the repo path, so a RepoRoot containing spaces is not split
+    # into separate arguments (ArgumentList is space-joined, not quoted).
     param([Parameter(Mandatory)][string]$RepoRoot, [Parameter(Mandatory)][string]$Spec)
     $tmp = Join-Path $env:TEMP ('gitblob-' + [guid]::NewGuid().ToString('N') + '.bin')
     try {
-        $p = Start-Process -FilePath 'git' -ArgumentList @('-C', $RepoRoot, 'cat-file', 'blob', $Spec) `
+        $p = Start-Process -FilePath 'git' -WorkingDirectory $RepoRoot -ArgumentList @('cat-file', 'blob', $Spec) `
             -RedirectStandardOutput $tmp -NoNewWindow -Wait -PassThru
         if ($p.ExitCode -ne 0) { throw "GIT_BLOB_FAILED: '$Spec'" }
         return [IO.File]::ReadAllBytes($tmp)
     } finally {
         Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
     }
+}
+
+function Push-NewBranch {
+    # Create-only push: an empty expected value in --force-with-lease means "this ref must not
+    # exist", so the create decision is atomic on the remote. A prior ls-remote is only a
+    # friendly early error and is not what makes this safe; there is no unconditional force.
+    param(
+        [Parameter(Mandatory)][string]$RepoRoot,
+        [Parameter(Mandatory)][string]$Branch,
+        [string]$Remote = 'origin'
+    )
+    $lease = "--force-with-lease=refs/heads/$Branch`:"
+    $r = Invoke-Git -RepoRoot $RepoRoot -GitArgs @('push', '-u', $lease, $Remote, $Branch) -AllowFail
+    if ($r.ExitCode -eq 0) { return $r }
+    if ($r.Text -match 'stale info|already exists|fetch first') {
+        throw "BRANCH_CREATED_CONCURRENTLY: '$Branch' already existed on '$Remote'; nothing was pushed"
+    }
+    throw ("GIT_PUSH_FAILED ($($r.ExitCode)): " + $r.Text)
 }
 
 function Get-GhPath {
@@ -265,8 +362,15 @@ function Assert-GhReady {
     # Missing tools are reported, never installed.
     $gh = Get-GhPath
     if (-not $gh) { throw 'GH_NOT_FOUND: GitHub CLI (gh) is not installed; this script will not install or upgrade it' }
-    $out = & $gh auth status 2>&1
-    if ($LASTEXITCODE -ne 0) {
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $out = & $gh auth status 2>&1
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+    if ($code -ne 0) {
         throw ("GH_AUTH_FAILED: " + ((@($out) | ForEach-Object { "$_" }) -join "`n"))
     }
 }
@@ -280,12 +384,15 @@ function Open-DraftPullRequest {
         [string]$Body = ''
     )
     $gh = Get-GhPath
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     Push-Location -LiteralPath $Worktree
     try {
         $out = & $gh pr create --draft --base $BaseBranch --head $Branch --title $Title --body $Body 2>&1
         $code = $LASTEXITCODE
     } finally {
         Pop-Location
+        $ErrorActionPreference = $prev
     }
     $text = (@($out) | ForEach-Object { "$_" }) -join "`n"
     if ($code -ne 0) { throw "GH_PR_CREATE_FAILED: $text" }

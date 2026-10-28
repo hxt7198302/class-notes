@@ -2,7 +2,7 @@
 #
 # Standard git flow: freeze the base SHA, stage the folder in a temporary worktree, commit,
 # push a new branch, then open a draft PR with the GitHub CLI. The base branch is never
-# written to and no ref is forced.
+# written to and no existing ref is overwritten.
 #
 # Default is a dry run: prints the manifest and the plan, touches no network.
 # Add -Apply -Branch <name> to create the branch and open the PR.
@@ -62,6 +62,7 @@ $baseSha = Get-RemoteBranchSha -RepoRoot $repoFull -Branch $BaseBranch
 Write-Output "BASE_FROZEN $BaseBranch $baseSha"
 Confirm-BaseCommitLocal -RepoRoot $repoFull -BaseSha $baseSha -BaseBranch $BaseBranch
 if (Test-RemoteBranchExists -RepoRoot $repoFull -Branch $Branch) {
+    # Early, friendly error only. The atomic guard is the empty-expect lease in Push-NewBranch.
     throw "BRANCH_EXISTS: '$Branch' already exists; pick another name or delete it yourself"
 }
 
@@ -69,7 +70,7 @@ $wt = Join-Path $env:TEMP ('publish-' + [guid]::NewGuid().ToString('N'))
 $null = Initialize-PublishWorktree -RepoRoot $repoFull -BaseSha $baseSha -Path $wt
 try {
     $target = if ($prefix) { Join-Path $wt ($prefix -replace '/', '\') } else { $wt }
-    Copy-PublishItems -Items $items -TargetFull $target
+    Copy-PublishItems -Items $items -TargetFull $target -TargetRoot $wt
 
     $null = Invoke-Git -RepoRoot $wt -GitArgs @('switch', '-c', $Branch)
     $null = Invoke-Git -RepoRoot $wt -GitArgs @('add', '-A')
@@ -82,7 +83,7 @@ try {
     Write-Output $stat.Text
 
     $null = Invoke-Git -RepoRoot $wt -GitArgs @('commit', '-m', $CommitMessage)
-    $push = Invoke-Git -RepoRoot $wt -GitArgs @('push', '-u', 'origin', $Branch)
+    $push = Push-NewBranch -RepoRoot $wt -Branch $Branch
     Write-Output $push.Text
 
     if (-not $PrTitle) { $PrTitle = $CommitMessage }
