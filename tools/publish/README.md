@@ -2,65 +2,70 @@
 
 > 本文由 AI 整理。
 
-仓库从 `hxt7198302/class-notes` 转入 `shaocongzeming/class-notes` 后，这两个发布脚本的 `Owner` 默认值改为 `shaocongzeming`（Issue #1）。
+把已脱敏的目录推到**新分支 + 草稿 PR**，安装包走**草稿 Release**。全程使用现成的 `git` 与 GitHub CLI（`gh`），不自建 GitHub 对象/API 发布层。
 
-| 脚本 | 用途 |
+| 文件 | 用途 |
 |---|---|
-| `github-publish.ps1` | 把一个已脱敏的目录整包上传，在新分支上提交并开草稿 PR |
-| `github-publish-merge.ps1` | 把脱敏包追加到子目录（如 `merged-v0.1/`），可选在根 README 加一段指针，同样走新分支 + 草稿 PR |
-| `lib/publish-common.ps1` | 两个脚本共用的路径校验、清单、GitHub API 封装 |
-| `tests/publish-safety.tests.ps1` | 路径与分支校验的离线自测 |
-
-## 安全约束（2026-10-28 按评审意见重写）
-
-1. **不写 main。** 脚本只会 `POST /git/refs` 新建 `refs/heads/<Branch>`，再 `POST /pulls` 开草稿 PR；没有任何 PATCH ref 的代码路径，也没有 `force` 参数。目标分支已存在就直接报错退出，不覆盖。
-2. **基准只冻结一次。** 每次 `-Apply` 先取一次 `GET /git/ref/heads/<BaseBranch>` 得到 `baseSha`，根 README 用 `contents/README.md?ref=<baseSha>` 读，`base_tree` 与 `parents` 也只用这枚 SHA；运行中分支前移不会混用新头，输出 `BASE_FROZEN <branch> <sha>` 留痕。
-3. **提交带 parent、树带 base_tree。** 提交以冻结的基准 tip 为 parent，树以它的 tree 为 `base_tree`，未列出的文件保持原样；不会出现「无 parent 根提交把历史和源码树重置」的情况。
-4. **上传路径规范化后再校验。** 用 `[IO.Path]::GetFullPath` 规范化 `-Root`，用逐段前缀比较求相对路径（PowerShell 5.1 没有 `GetRelativePath`），统一转 `/`，再逐条拒绝：盘符、`/` 或 `\` 开头、`..`/`.`/空段、反斜杠、控制字符、超出 `-Root` 的条目、`.git` 目录。
-5. **链接检查覆盖根链与树内目录。** `-Root` 本身、从 `-Root` 到仓库根的每一级祖先、`-Root` 下递归遇到的每个目录/文件，凡带 `ReparsePoint` 一律拒绝（`LINK_IN_ROOT_CHAIN` / `LINK_IN_TREE` / `SYMLINK_IN_TREE`），不跟随。覆盖范围按上述检查项列明，不声称「已拒绝全部链接」。
-6. **默认 dry-run。** 不带 `-Apply` 只打印清单（`FILE <target path>\t<bytes>`、`MANIFEST_FILES`），不联网、不写任何东西。加 `-Apply -Branch <name>` 才上传。
-7. **凭据文件拦截。** `.env*`、`*.pem/*.pfx/*.p12/*.keystore/*.jks/*.key/*.ppk`、`id_rsa*`、`.netrc`、`.npmrc`、`credentials.json` 一律拦下；确认误报后可用 `-AllowSensitive` 放行，清单里会标明。
-8. **token 不落盘、不打印。** 从 Windows Git Credential Manager 读取；`-Sha256` 只用于本地清单核对。
-9. **不开 Release。** 安装包请用 `gh release upload <tag> <file...>`；本目录脚本只处理源码/快照提交。
+| `github-publish.ps1` | 把目录整包发布到仓库（可指定子目录） |
+| `github-publish-merge.ps1` | 把目录追加到子目录，可选在根 README 加一段指针 |
+| `release-draft.ps1` | 为 APK/ZIP 创建**草稿** Release |
+| `lib/publish-common.ps1` | 路径/链接/凭据前置检查、冻结基准、临时 worktree、git/gh 调用 |
+| `tests/publish-safety.tests.ps1` | 离线自测（不联网） |
 
 ## 用法
 
 ```powershell
-# 1) 先 dry-run，把清单贴进 PR 或群里核对
+# 1) dry-run：只打印清单与目标前缀，不联网、不写文件
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\publish\github-publish.ps1 `
     -Root .\dist -Subdir dist -Branch publish/example -Sha256
 
-# 2) 确认后上传并开草稿 PR（分支名不能是 main/master，也不能与基准分支同名）
+# 2) 执行：冻结基准 → 临时 worktree 提交 → 推新分支 → 开草稿 PR
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\publish\github-publish.ps1 `
     -Root .\dist -Subdir dist -Branch publish/example -Apply
+
+# 3) 安装包：创建草稿 Release（不会正式发布）
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\publish\release-draft.ps1 `
+    -Tag v1.2.3 -Assets .\dist\app.apk -Title 'v1.2.3' -NotesFile .\dist\NOTES.md -Apply
 ```
 
-参数：
+## 参数
 
-- `-Root`：本地已脱敏目录，相对路径按仓库根解析；必须在仓库内，且不能是仓库根。
-- `-Subdir`：上传到仓库里的子目录前缀，留空则按 `-Root` 内的相对路径直接放在根下。
+- `-Root`：本地已脱敏目录；相对路径按仓库根解析；必须在仓库内，且不能是仓库根。
+- `-Subdir`：仓库内目标子目录；留空表示按 `-Root` 内的结构直接放在仓库根下。
+- `-BaseBranch`：默认 `main`，只从这里取基准 SHA，不向它写。
 - `-Branch`：`-Apply` 时必填，例如 `publish/merged-v0.1`。
-- `-BaseBranch`：默认 `main`，只从它取 tip 和 `base_tree`，不向它写。
-- `-RepoRoot`：脚本不在仓库 `tools\publish` 下时显式指定仓库根。
-- `-BackupDir`（仅 merge）：改动根 README 前把远端原文备份到本地，默认 `%TEMP%\classnotes-publish-backup`。
+- `-Sha256`：dry-run 清单附带每个文件的 SHA-256。
+- `-AllowSensitive`：确认误报后放行凭据类文件名。
+- `-KeepWorktree`：保留临时 worktree 便于排查；默认自动清理。
+- `-RepoRoot`：脚本不在 `tools\publish` 下时显式指定仓库根。
 
-## 自测
+## 回滚
+
+- 关闭 PR 并删远端分支：`gh pr close <编号> --delete-branch`
+- 只删远端分支：`git push origin --delete <分支名>`
+- 删草稿 Release：`gh release delete <tag> --yes`
+- 本地残留 worktree：`git worktree remove --force <路径>`（`git worktree list` 可查）
+
+## 验证
 
 ```powershell
+# 离线自测
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\publish\tests\publish-safety.tests.ps1
+
+# 执行后核对
+git ls-remote --heads origin <分支名>
+gh pr view <编号> --json isDraft,state,headRefOid,baseRefName
 ```
 
-覆盖：正常相对路径、盘符、`/` 与 `\` 开头、`..` 越界、空段、反斜杠、仓库根被当发布目录、目录不存在、目录在仓库外、凭据文件名、目标分支为 `main`、内容接口带冻结 ref、`-Root` 为 junction、`-Root` 祖先为 junction、`-Root` 内子目录为 junction（后四条为离线反例，用临时 junction 构造，不联网）。
+自测覆盖：子目录参数、凭据文件名、发布目录范围、清单相对路径、冻结 blob 读取、`-Root` 为 junction、祖先为 junction、树内子目录为 junction（临时 junction 构造，离线），以及 `gh` 缺失时的报错路径。
 
-## 语法自检
+## 安全约束
 
-```powershell
-$errs = $null
-$null = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path .\tools\publish\github-publish.ps1), [ref]$null, [ref]$errs)
-$errs
-```
-
-## 变更记录
-
-- 2026-10-28（第二版）：按韶聪侧 Codex 复核 835#/838# 补两处边界——① 基准 SHA 冻结一次，README 读取带 `?ref=<baseSha>`，`base_tree`/`parents` 同源，避免基准非默认分支时用默认分支 README 覆盖；② 链接检查从「只查文件」扩到根链（`-Root` + 祖先到仓库根）与树内目录，补三条离线反例。仍为草稿 PR，未执行 `-Apply`、未触发 Release。
-- 2026-10-28：按韶聪侧 Codex 评审（PR #2 评论）重写。旧版 `github-publish.ps1` 会创建无 parent 根提交并 `force=true` 更新 main，旧版两脚本用相对路径长度裁绝对路径（`./dist` 之类会把本机目录片段带进上传路径）。现版本改为「规范化路径 + dry-run 清单 + 新分支 + 草稿 PR」，并把脚本从纯 Owner 换址 PR 中拆出单独评审。
+1. **不写基准分支。** 只推新分支、开草稿 PR；目标分支已存在直接报错，不覆盖。
+2. **基准只冻结一次。** 每次 `-Apply` 先取一次远端基准 SHA，worktree、README 读取、提交父节点都用这枚 SHA；运行中基准前移不混用。
+3. **不强制更新引用。** 无 force 参数，不 PATCH 任何分支。
+4. **链接与路径前置拒绝。** `-Root` 本身、到仓库根的每级祖先、树内每个目录/文件，凡带 ReparsePoint 一律拒绝；`-Subdir` 拒绝盘符、`..`、`.`、空段与 `.git`。
+5. **凭据文件拦截。** `.env*`、`*.pem/*.pfx/*.p12/*.keystore/*.jks/*.key/*.ppk`、`id_rsa*`、`.netrc`、`.npmrc`、`credentials.json` 默认拦下。
+6. **默认 dry-run、默认草稿。** 不加 `-Apply` 不联网；PR 与 Release 都先建草稿。
+7. **缺工具只报错。** 未安装 `gh` 时报 `GH_NOT_FOUND`，不自动安装或升级系统依赖。
+8. **许可与署名保留。** 目录整包原样复制，`LICENSE`、`NOTICE`、署名文件不筛选、不改写；请确认待发布内容本身允许公开。

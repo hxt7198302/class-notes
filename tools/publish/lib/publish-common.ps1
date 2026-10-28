@@ -1,10 +1,10 @@
 ﻿# Shared helpers for the maintainer publish scripts.
 #
-# Design rule: fail closed.
-#   * Every path that is uploaded must be a plain relative path inside -Root:
-#     no drive letters, no leading separators, no "..", no backslashes.
-#   * These helpers never write to a base branch and never force-update a ref.
-#   * Nothing here needs network access, so dry-run stays offline.
+# Flow: freeze the base SHA once, stage files in a git worktree, commit and push a new
+# branch, then open a draft PR with the GitHub CLI. There is no direct GitHub object/API
+# layer here, and no code path writes to the base branch or forces a ref.
+#
+# Nothing in the dry-run path touches the network.
 
 function Get-PublishRepoRoot {
     param(
@@ -23,11 +23,26 @@ function Get-PublishRepoRoot {
     return $root
 }
 
+function Invoke-Git {
+    param(
+        [Parameter(Mandatory)][string]$RepoRoot,
+        [Parameter(Mandatory)][string[]]$GitArgs,
+        [switch]$AllowFail
+    )
+    $out = & git -C $RepoRoot @GitArgs 2>&1
+    $code = $LASTEXITCODE
+    $lines = @($out | ForEach-Object { "$_" })
+    $text = $lines -join "`n"
+    if ($code -ne 0 -and -not $AllowFail) {
+        throw ("GIT_FAILED ($code): git " + ($GitArgs -join ' ') + "`n" + $text)
+    }
+    return [pscustomobject]@{ ExitCode = $code; Text = $text; Lines = $lines }
+}
+
 function Assert-NoLinkChain {
-    # GetFullPath does not resolve junctions/symlinks, so a reparse point anywhere between
-    # -Path and the repository root can quietly redirect a "repo-internal" path outside the
-    # repo. Check every component and never follow a link. This covers the root itself and
-    # its ancestors; subdirectories inside the tree are checked during enumeration.
+    # GetFullPath does not resolve junctions/symlinks, so a reparse point between -Path and
+    # the repository root can redirect a "repo-internal" path outside the repo. Check every
+    # component and never follow a link.
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][string]$RepoRoot
@@ -46,19 +61,30 @@ function Assert-NoLinkChain {
     }
 }
 
+function Assert-NoLinksInTree {
+    # Directories first: a junction subdirectory is rejected before its contents are read.
+    # Scope is exactly: every directory and file under -Root (plus the root chain above).
+    param([Parameter(Mandatory)][string]$RootFull)
+    foreach ($d in Get-ChildItem -LiteralPath $RootFull -Recurse -Force -Directory) {
+        if ($d.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "LINK_IN_TREE: '$($d.FullName)' is a junction/symlink directory (it can point outside the publish root)"
+        }
+    }
+    foreach ($f in Get-ChildItem -LiteralPath $RootFull -Recurse -File) {
+        if ($f.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "SYMLINK_IN_TREE: '$($f.FullName)' is a junction/symlink file"
+        }
+    }
+}
+
 function Resolve-PublishRoot {
     param(
         [Parameter(Mandatory)][string]$Root,
         [Parameter(Mandatory)][string]$RepoRoot
     )
     if ([string]::IsNullOrWhiteSpace($Root)) { throw 'ROOT_EMPTY: -Root must point at a directory' }
-
-    if ([IO.Path]::IsPathRooted($Root)) {
-        $full = [IO.Path]::GetFullPath($Root)
-    } else {
-        $full = [IO.Path]::GetFullPath((Join-Path $RepoRoot $Root))
-    }
-    $full = $full.TrimEnd('\', '/')
+    $full = if ([IO.Path]::IsPathRooted($Root)) { $Root } else { Join-Path $RepoRoot $Root }
+    $full = [IO.Path]::GetFullPath($full).TrimEnd('\', '/')
     $repo = [IO.Path]::GetFullPath($RepoRoot).TrimEnd('\', '/')
 
     if ($full.Equals($repo, [StringComparison]::OrdinalIgnoreCase)) {
@@ -68,38 +94,23 @@ function Resolve-PublishRoot {
               $full.StartsWith($repo + '/', [StringComparison]::OrdinalIgnoreCase)
     if (-not $inside) { throw "ROOT_OUTSIDE_REPO: '$full' is not inside '$repo'" }
     if (-not (Test-Path -LiteralPath $full -PathType Container)) { throw "ROOT_NOT_FOUND: '$full' is not a directory" }
+
     Assert-NoLinkChain -Path $full -RepoRoot $repo
     return $full
 }
 
-function Assert-SafeRelPath {
-    param([Parameter(Mandatory)][AllowEmptyString()][string]$RelPath)
-    if ([string]::IsNullOrWhiteSpace($RelPath)) { throw 'REL_EMPTY: empty relative path' }
-    if ($RelPath -match '^[A-Za-z]:') { throw "REL_HAS_DRIVE: '$RelPath'" }
-    if ($RelPath.StartsWith('/') -or $RelPath.StartsWith('\')) { throw "REL_ABSOLUTE: '$RelPath'" }
-    if ([IO.Path]::IsPathRooted($RelPath)) { throw "REL_ROOTED: '$RelPath'" }
-    if ($RelPath.Contains('\')) { throw "REL_BACKSLASH: '$RelPath' (path must use '/')" }
-    foreach ($seg in $RelPath.Split('/')) {
-        if ($seg -eq '' -or $seg -eq '.' -or $seg -eq '..') { throw "REL_BAD_SEGMENT: '$RelPath'" }
+function Assert-SafeSubdir {
+    # Validates the -Subdir argument. Paths inside the worktree are computed by git.
+    param([AllowEmptyString()][string]$Subdir)
+    if ([string]::IsNullOrWhiteSpace($Subdir)) { return '' }
+    $s = $Subdir.Replace('\', '/').Trim('/')
+    if ($s -match '^[A-Za-z]:') { throw "SUBDIR_HAS_DRIVE: '$Subdir'" }
+    if ([regex]::IsMatch($s, '[\x00-\x1f]')) { throw "SUBDIR_CONTROL_CHAR: '$Subdir'" }
+    foreach ($seg in $s.Split('/')) {
+        if ($seg -eq '' -or $seg -eq '.' -or $seg -eq '..') { throw "SUBDIR_BAD_SEGMENT: '$Subdir'" }
     }
-    if ([regex]::IsMatch($RelPath, '[\x00-\x1f]')) { throw "REL_CONTROL_CHAR: '$RelPath'" }
-    if ($RelPath.Length -gt 400) { throw "REL_TOO_LONG: '$RelPath'" }
-}
-
-function Get-RelPath {
-    param(
-        [Parameter(Mandatory)][string]$BaseFull,
-        [Parameter(Mandatory)][string]$FileFull
-    )
-    $base = $BaseFull.TrimEnd('\', '/')
-    $file = [IO.Path]::GetFullPath($FileFull)
-    $prefix = $base + [IO.Path]::DirectorySeparatorChar
-    if (-not $file.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
-        throw "PATH_OUTSIDE_ROOT: '$file' is not under '$base'"
-    }
-    $rel = $file.Substring($base.Length + 1).Replace('\', '/')
-    Assert-SafeRelPath $rel
-    return $rel
+    if ($s.Split('/')[0] -eq '.git') { throw "SUBDIR_GIT_DIR: '$Subdir'" }
+    return $s
 }
 
 function Test-SensitiveName {
@@ -118,50 +129,40 @@ function Test-SensitiveName {
 }
 
 function Get-PublishManifest {
-    param(
-        [Parameter(Mandatory)][string]$RootFull,
-        [string]$Subdir = ''
-    )
-    $prefix = $Subdir.Replace('\', '/').Trim('/')
-    if ($prefix) { Assert-SafeRelPath $prefix }
+    param([Parameter(Mandatory)][string]$RootFull)
+    Assert-NoLinksInTree -RootFull $RootFull
 
     $items = New-Object System.Collections.ArrayList
-    # Directories first: a junction/symlink subdirectory (even one pointing outside the repo)
-    # must be rejected before its contents are enumerated. This is not "all links": it covers
-    # every directory and file under -Root; the root chain is checked in Resolve-PublishRoot.
-    foreach ($d in Get-ChildItem -LiteralPath $RootFull -Recurse -Force -Directory) {
-        if ($d.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-            throw "LINK_IN_TREE: '$($d.FullName)' is a junction/symlink directory (refusing: it can point outside the publish root)"
+    Push-Location -LiteralPath $RootFull
+    try {
+        foreach ($f in Get-ChildItem -LiteralPath $RootFull -Recurse -Force -File) {
+            $rel = Resolve-Path -LiteralPath $f.FullName -Relative
+            if ($rel.StartsWith('.\')) { $rel = $rel.Substring(2) }
+            $rel = $rel.Replace('\', '/')
+            if ($rel.Split('/')[0] -eq '.git') { throw "GIT_DIR_IN_TREE: '$($f.FullName)'" }
+            $null = $items.Add([pscustomobject]@{
+                RelPath  = $rel
+                FullName = $f.FullName
+                Size     = $f.Length
+            })
         }
-    }
-    foreach ($f in Get-ChildItem -LiteralPath $RootFull -Recurse -File) {
-        if ($f.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-            throw "SYMLINK_IN_TREE: '$($f.FullName)' (refusing: a link can point outside the publish root)"
-        }
-        $rel = Get-RelPath -BaseFull $RootFull -FileFull $f.FullName
-        if ($rel.Split('/')[0] -eq '.git') { throw "GIT_DIR_IN_TREE: '$($f.FullName)'" }
-        $target = if ($prefix) { "$prefix/$rel" } else { $rel }
-        Assert-SafeRelPath $target
-        $null = $items.Add([pscustomobject]@{
-            RelPath    = $rel
-            TargetPath = $target
-            FullName   = $f.FullName
-            Size       = $f.Length
-        })
+    } finally {
+        Pop-Location
     }
     return $items
 }
 
 function Write-PublishManifest {
-    param($Items, [switch]$WithHash)
+    param($Items, [switch]$WithHash, [string]$Prefix = '')
     $total = 0L
     foreach ($it in @($Items)) {
         $total += $it.Size
+        $target = if ($Prefix) { "$Prefix/$($it.RelPath)" } else { $it.RelPath }
         if ($WithHash) {
             $h = (Get-FileHash -LiteralPath $it.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-            Write-Output ("FILE {0}`t{1}`tsha256:{2}" -f $it.TargetPath, $it.Size, $h)
+            Write-Output ("FILE {0}`t{1}`tsha256:{2}" -f $target, $it.Size, $h)
         } else {
-            Write-Output ("FILE {0}`t{1}" -f $it.TargetPath, $it.Size)
+            Write-Output ("FILE {0}`t{1}" -f $target, $it.Size)
         }
     }
     Write-Output ("MANIFEST_FILES {0} BYTES {1}" -f @($Items).Count, $total)
@@ -180,162 +181,115 @@ function Assert-SafeBranchName {
     if ($Branch.Contains('..') -or $Branch.EndsWith('/') -or $Branch.EndsWith('.lock')) { throw "BRANCH_INVALID: '$Branch'" }
 }
 
-function Get-GitHubAuthHeaders {
-    # Token comes from Git Credential Manager and is never printed or stored.
-    $tmp = Join-Path $env:TEMP ("gitcred-" + [guid]::NewGuid().ToString('N') + ".txt")
-    [IO.File]::WriteAllText($tmp, "protocol=https`nhost=github.com`n`n")
+function Get-RemoteBranchSha {
+    # The single frozen base for this run: README read, worktree and commit parent all use it.
+    param([Parameter(Mandatory)][string]$RepoRoot, [Parameter(Mandatory)][string]$Branch)
+    $r = Invoke-Git -RepoRoot $RepoRoot -GitArgs @('ls-remote', '--heads', 'origin', "refs/heads/$Branch") -AllowFail
+    if ($r.ExitCode -ne 0) { throw "GIT_LS_REMOTE_FAILED: $($r.Text)" }
+    if ($r.Text -notmatch '(?m)^([0-9a-f]{40})\s+refs/heads/') { throw "BRANCH_NOT_FOUND: '$Branch' on origin" }
+    return $Matches[1]
+}
+
+function Test-RemoteBranchExists {
+    param([Parameter(Mandatory)][string]$RepoRoot, [Parameter(Mandatory)][string]$Branch)
+    $r = Invoke-Git -RepoRoot $RepoRoot -GitArgs @('ls-remote', '--heads', 'origin', "refs/heads/$Branch") -AllowFail
+    if ($r.ExitCode -ne 0) { throw "GIT_LS_REMOTE_FAILED: $($r.Text)" }
+    return [bool]$r.Text.Trim()
+}
+
+function Confirm-BaseCommitLocal {
+    param(
+        [Parameter(Mandatory)][string]$RepoRoot,
+        [Parameter(Mandatory)][string]$BaseSha,
+        [Parameter(Mandatory)][string]$BaseBranch
+    )
+    $ok = Invoke-Git -RepoRoot $RepoRoot -GitArgs @('cat-file', '-e', "$BaseSha^{commit}") -AllowFail
+    if ($ok.ExitCode -eq 0) { return }
+    $null = Invoke-Git -RepoRoot $RepoRoot -GitArgs @('fetch', 'origin', $BaseBranch) -AllowFail
+    $ok = Invoke-Git -RepoRoot $RepoRoot -GitArgs @('cat-file', '-e', "$BaseSha^{commit}") -AllowFail
+    if ($ok.ExitCode -eq 0) { return }
+    $f = Invoke-Git -RepoRoot $RepoRoot -GitArgs @('fetch', 'origin', $BaseSha) -AllowFail
+    if ($f.ExitCode -ne 0) { throw "BASE_COMMIT_UNAVAILABLE: cannot fetch $BaseSha" }
+}
+
+function Initialize-PublishWorktree {
+    param(
+        [Parameter(Mandatory)][string]$RepoRoot,
+        [Parameter(Mandatory)][string]$BaseSha,
+        [Parameter(Mandatory)][string]$Path
+    )
+    if (Test-Path -LiteralPath $Path) { throw "WORKTREE_PATH_EXISTS: '$Path'" }
+    $null = Invoke-Git -RepoRoot $RepoRoot -GitArgs @('worktree', 'add', '--detach', '--quiet', $Path, $BaseSha)
+    return $Path
+}
+
+function Remove-PublishWorktree {
+    param([Parameter(Mandatory)][string]$RepoRoot, [Parameter(Mandatory)][string]$Path)
+    if (Test-Path -LiteralPath $Path) {
+        $null = Invoke-Git -RepoRoot $RepoRoot -GitArgs @('worktree', 'remove', '--force', $Path) -AllowFail
+    }
+}
+
+function Copy-PublishItems {
+    param($Items, [Parameter(Mandatory)][string]$TargetFull)
+    if (-not (Test-Path -LiteralPath $TargetFull)) { $null = New-Item -ItemType Directory -Path $TargetFull -Force }
+    foreach ($it in @($Items)) {
+        $dest = Join-Path $TargetFull ($it.RelPath -replace '/', '\')
+        $parent = Split-Path -Parent $dest
+        if (-not (Test-Path -LiteralPath $parent)) { $null = New-Item -ItemType Directory -Path $parent -Force }
+        Copy-Item -LiteralPath $it.FullName -Destination $dest -Force
+    }
+}
+
+function Get-GitBlobBytes {
+    # Reads a blob exactly as stored (binary-safe), e.g. "<sha>:README.md".
+    param([Parameter(Mandatory)][string]$RepoRoot, [Parameter(Mandatory)][string]$Spec)
+    $tmp = Join-Path $env:TEMP ('gitblob-' + [guid]::NewGuid().ToString('N') + '.bin')
     try {
-        $cred = cmd /c "git -c credential.helper=manager credential fill < `"$tmp`"" 2>$null
+        $p = Start-Process -FilePath 'git' -ArgumentList @('-C', $RepoRoot, 'cat-file', 'blob', $Spec) `
+            -RedirectStandardOutput $tmp -NoNewWindow -Wait -PassThru
+        if ($p.ExitCode -ne 0) { throw "GIT_BLOB_FAILED: '$Spec'" }
+        return [IO.File]::ReadAllBytes($tmp)
     } finally {
         Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
     }
-    $pass = ($cred | Where-Object { $_ -like 'password=*' }) -replace '^password=', ''
-    if (-not $pass) { throw 'NO_CREDENTIAL: no github.com credential in Windows Git Credential Manager' }
-    return @{
-        Authorization          = "token $pass"
-        Accept                 = 'application/vnd.github+json'
-        'User-Agent'           = 'classnotes-publish'
-        'X-GitHub-Api-Version' = '2022-11-28'
+}
+
+function Get-GhPath {
+    $c = Get-Command gh -ErrorAction SilentlyContinue
+    if (-not $c) { return $null }
+    return $c.Source
+}
+
+function Assert-GhReady {
+    # Missing tools are reported, never installed.
+    $gh = Get-GhPath
+    if (-not $gh) { throw 'GH_NOT_FOUND: GitHub CLI (gh) is not installed; this script will not install or upgrade it' }
+    $out = & $gh auth status 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw ("GH_AUTH_FAILED: " + ((@($out) | ForEach-Object { "$_" }) -join "`n"))
     }
 }
 
-function Invoke-GitHub {
+function Open-DraftPullRequest {
     param(
-        [Parameter(Mandatory)][string]$Method,
-        [Parameter(Mandatory)][string]$Uri,
-        $Body,
-        [Parameter(Mandatory)][hashtable]$Headers,
-        [int]$TimeoutSec = 90
-    )
-    $p = @{ Method = $Method; Uri = $Uri; Headers = $Headers; TimeoutSec = $TimeoutSec }
-    if ($null -ne $Body) {
-        $p.ContentType = 'application/json; charset=utf-8'
-        $p.Body = [Text.Encoding]::UTF8.GetBytes(($Body | ConvertTo-Json -Depth 12 -Compress))
-    }
-    return Invoke-RestMethod @p
-}
-
-function Get-PublishBase {
-    # Freeze the base branch once per run. The returned Sha is the only base used for the
-    # README read, base_tree and parents; a branch moving mid-run is not mixed in.
-    param(
-        [Parameter(Mandatory)][string]$Owner,
-        [Parameter(Mandatory)][string]$Repo,
-        [Parameter(Mandatory)][string]$BaseBranch
-    )
-    $H = Get-GitHubAuthHeaders
-    $base = "https://api.github.com/repos/$Owner/$Repo"
-    $ref = Invoke-GitHub -Method GET -Uri "$base/git/ref/heads/$BaseBranch" -Headers $H
-    $sha = $ref.object.sha
-    $commit = Invoke-GitHub -Method GET -Uri "$base/git/commits/$sha" -Headers $H
-    return [pscustomobject]@{ Sha = $sha; TreeSha = $commit.tree.sha }
-}
-
-function Get-GitHubContentUri {
-    param(
-        [Parameter(Mandatory)][string]$Owner,
-        [Parameter(Mandatory)][string]$Repo,
-        [Parameter(Mandatory)][string]$Path,
-        [string]$Ref
-    )
-    $uri = "https://api.github.com/repos/$Owner/$Repo/contents/$Path"
-    if ($Ref) { $uri += '?ref=' + [Uri]::EscapeDataString($Ref) }
-    return $uri
-}
-
-function Get-GitHubFileText {
-    # -Ref must be the same frozen SHA later passed to base_tree/parents; without it the API
-    # reads the repository default branch, which silently overwrites a non-default base.
-    param(
-        [Parameter(Mandatory)][string]$Owner,
-        [Parameter(Mandatory)][string]$Repo,
-        [Parameter(Mandatory)][string]$Path,
-        [string]$Ref
-    )
-    $H = Get-GitHubAuthHeaders
-    $resp = Invoke-GitHub -Method GET -Uri (Get-GitHubContentUri -Owner $Owner -Repo $Repo -Path $Path -Ref $Ref) -Headers $H
-    return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($resp.content))
-}
-
-function Invoke-Publish {
-    # Upload $Items as blobs on a brand-new branch, commit with the base tip as parent,
-    # then open a (draft) pull request. There is no code path that writes to $BaseBranch
-    # and no force flag anywhere.
-    param(
-        [Parameter(Mandatory)][string]$Owner,
-        [Parameter(Mandatory)][string]$Repo,
+        [Parameter(Mandatory)][string]$Worktree,
         [Parameter(Mandatory)][string]$BaseBranch,
-        [Parameter(Mandatory)][AllowEmptyString()][string]$Branch,
-        $Items,
-        $TextEntries = @(),
-        [Parameter(Mandatory)][string]$CommitMessage,
-        [string]$PrTitle,
-        [string]$PrBody,
-        [string]$BaseSha = '',
-        [switch]$Draft
+        [Parameter(Mandatory)][string]$Branch,
+        [Parameter(Mandatory)][string]$Title,
+        [string]$Body = ''
     )
-    $base = "https://api.github.com/repos/$Owner/$Repo"
-    $H = Get-GitHubAuthHeaders
-    $me = Invoke-GitHub -Method GET -Uri 'https://api.github.com/user' -Headers $H
-    Write-Output "AUTH_OK login=$($me.login) target=$Owner/$Repo"
-
-    if ($BaseSha) {
-        $headSha = $BaseSha
-    } else {
-        $headRef = Invoke-GitHub -Method GET -Uri "$base/git/ref/heads/$BaseBranch" -Headers $H
-        $headSha = $headRef.object.sha
-    }
-    $headCommit = Invoke-GitHub -Method GET -Uri "$base/git/commits/$headSha" -Headers $H
-    Write-Output "BASE_FROZEN $BaseBranch $headSha tree=$($headCommit.tree.sha)"
-
-    $branchExists = $false
+    $gh = Get-GhPath
+    Push-Location -LiteralPath $Worktree
     try {
-        $null = Invoke-GitHub -Method GET -Uri "$base/git/ref/heads/$Branch" -Headers $H
-        $branchExists = $true
-    } catch {
-        $branchExists = $false
+        $out = & $gh pr create --draft --base $BaseBranch --head $Branch --title $Title --body $Body 2>&1
+        $code = $LASTEXITCODE
+    } finally {
+        Pop-Location
     }
-    if ($branchExists) {
-        throw "BRANCH_EXISTS: '$Branch' already exists; this tool never force-updates a ref - pick another name or delete the branch yourself"
-    }
-
-    $entries = New-Object System.Collections.ArrayList
-    $i = 0
-    $count = @($Items).Count
-    foreach ($it in @($Items)) {
-        $i++
-        $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($it.FullName))
-        $blob = Invoke-GitHub -Method POST -Uri "$base/git/blobs" -Body @{ content = $b64; encoding = 'base64' } -Headers $H
-        $null = $entries.Add(@{ path = $it.TargetPath; mode = '100644'; type = 'blob'; sha = $blob.sha })
-        if ($i % 20 -eq 0) { Write-Output "BLOBS $i/$count" }
-    }
-    Write-Output "BLOBS_DONE $count"
-
-    foreach ($t in @($TextEntries)) {
-        $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$t.text))
-        $blob = Invoke-GitHub -Method POST -Uri "$base/git/blobs" -Body @{ content = $b64; encoding = 'base64' } -Headers $H
-        $null = $entries.Add(@{ path = $t.path; mode = '100644'; type = 'blob'; sha = $blob.sha })
-        Write-Output "TEXT_ENTRY $($t.path)"
-    }
-
-    # base_tree keeps everything already on the base branch; only listed paths change.
-    $tree = Invoke-GitHub -Method POST -Uri "$base/git/trees" -Body @{ base_tree = $headCommit.tree.sha; tree = $entries.ToArray() } -Headers $H
-    $commit = Invoke-GitHub -Method POST -Uri "$base/git/commits" -Body @{ message = $CommitMessage; tree = $tree.sha; parents = @($headSha) } -Headers $H
-    Write-Output "COMMIT $($commit.sha) parent=$headSha"
-
-    # Create a new ref only (no PATCH, no force).
-    $null = Invoke-GitHub -Method POST -Uri "$base/git/refs" -Body @{ ref = "refs/heads/$Branch"; sha = $commit.sha } -Headers $H
-    Write-Output "BRANCH_CREATED refs/heads/$Branch"
-
-    if (-not $PrTitle) { $PrTitle = $CommitMessage }
-    if (-not $PrBody) { $PrBody = "由维护者发布脚本生成；请评审后再合并。`n`n- 文件数：$count`n- 基准：$BaseBranch@$headSha" }
-    $pr = Invoke-GitHub -Method POST -Uri "$base/pulls" -Headers $H -Body @{
-        title = $PrTitle
-        head  = $Branch
-        base  = $BaseBranch
-        body  = $PrBody
-        draft = [bool]$Draft
-    }
-    Write-Output "PR #$($pr.number) $($pr.html_url)"
-    return $pr
+    $text = (@($out) | ForEach-Object { "$_" }) -join "`n"
+    if ($code -ne 0) { throw "GH_PR_CREATE_FAILED: $text" }
+    $url = (@($out) | ForEach-Object { "$_" } | Where-Object { $_ -match '^https://' } | Select-Object -First 1)
+    Write-Output "PR_DRAFT $url"
+    return $url
 }
