@@ -74,6 +74,61 @@ Check-Throws 'missing relative root rejected' { Resolve-PublishRoot -Root './no-
 Check-Throws 'root outside repo rejected' { Resolve-PublishRoot -Root $env:TEMP -RepoRoot $repoRoot } 'ROOT_OUTSIDE_REPO'
 Check-Equal 'in-repo absolute root accepted' ((Resolve-PublishRoot -Root (Join-Path $repoRoot 'tools') -RepoRoot $repoRoot) -eq (Join-Path $repoRoot 'tools')) $true
 
+# --- GitHub content URI must carry the frozen ref ---
+Check-Equal 'content uri includes frozen ref' `
+    (Get-GitHubContentUri -Owner 'o' -Repo 'r' -Path 'README.md' -Ref 'abc123') `
+    'https://api.github.com/repos/o/r/contents/README.md?ref=abc123'
+Check-Equal 'content uri without ref has no query' `
+    (Get-GitHubContentUri -Owner 'o' -Repo 'r' -Path 'README.md') `
+    'https://api.github.com/repos/o/r/contents/README.md'
+
+# --- offline counterexamples: junction as root / ancestor / subdirectory ---
+$linkTmp = Join-Path $env:TEMP ('publish-link-' + [guid]::NewGuid().ToString('N'))
+$fakeRepo = Join-Path $linkTmp 'repo'
+$outsideRoot = Join-Path $linkTmp 'outside-root'
+$outsideAnc = Join-Path $linkTmp 'outside-anc'
+$outsideSub = Join-Path $linkTmp 'outside-sub'
+$junctions = @()
+try {
+    $null = New-Item -ItemType Directory -Path (Join-Path $fakeRepo '.git') -Force
+    $null = New-Item -ItemType Directory -Path $outsideRoot -Force
+    [IO.File]::WriteAllText((Join-Path $outsideRoot 'leak.txt'), 'outside')
+    $null = New-Item -ItemType Directory -Path (Join-Path $outsideAnc 'pkg') -Force
+    [IO.File]::WriteAllText((Join-Path $outsideAnc 'pkg\leak.txt'), 'outside')
+    $null = New-Item -ItemType Directory -Path $outsideSub -Force
+    [IO.File]::WriteAllText((Join-Path $outsideSub 'leak.txt'), 'outside')
+
+    # 1) -Root itself is a junction pointing outside the repo.
+    $rootLink = Join-Path $fakeRepo 'root-link'
+    $null = New-Item -ItemType Junction -Path $rootLink -Target $outsideRoot
+    $junctions += $rootLink
+    Check-Throws 'junction used as -Root rejected' { Resolve-PublishRoot -Root $rootLink -RepoRoot $fakeRepo } 'LINK_IN_ROOT_CHAIN'
+
+    # 2) An ancestor of -Root is a junction pointing outside the repo.
+    $ancLink = Join-Path $fakeRepo 'anc'
+    $null = New-Item -ItemType Junction -Path $ancLink -Target $outsideAnc
+    $junctions += $ancLink
+    Check-Throws 'junction ancestor of -Root rejected' { Resolve-PublishRoot -Root (Join-Path $ancLink 'pkg') -RepoRoot $fakeRepo } 'LINK_IN_ROOT_CHAIN'
+
+    # 3) A subdirectory inside -Root is a junction pointing outside the repo.
+    $plainRoot = Join-Path $fakeRepo 'publish\pkg'
+    $null = New-Item -ItemType Directory -Path $plainRoot -Force
+    [IO.File]::WriteAllText((Join-Path $plainRoot 'ok.txt'), 'x')
+    $subLink = Join-Path $plainRoot 'linked'
+    $null = New-Item -ItemType Junction -Path $subLink -Target $outsideSub
+    $junctions += $subLink
+    Check-Throws 'junction subdirectory rejected' { Get-PublishManifest -RootFull $plainRoot } 'LINK_IN_TREE'
+
+    # 4) Control: after the link is removed the same plain directory is accepted.
+    $null = cmd /c "rmdir `"$subLink`""
+    $junctions = @($junctions | Where-Object { $_ -ne $subLink })
+    Check-Equal 'plain directory accepted after link removed' (@(Get-PublishManifest -RootFull $plainRoot).Count) 1
+    Check-Equal 'resolved plain root accepted' ((Resolve-PublishRoot -Root $plainRoot -RepoRoot $fakeRepo) -eq $plainRoot) $true
+} finally {
+    foreach ($j in $junctions) { $null = cmd /c "rmdir `"$j`"" 2>$null }
+    Remove-Item -LiteralPath $linkTmp -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 # --- Test-SensitiveName ---
 Check-Equal 'dotenv blocked' (Test-SensitiveName '.env') $true
 Check-Equal 'keystore blocked' (Test-SensitiveName 'demo.keystore') $true

@@ -23,6 +23,29 @@ function Get-PublishRepoRoot {
     return $root
 }
 
+function Assert-NoLinkChain {
+    # GetFullPath does not resolve junctions/symlinks, so a reparse point anywhere between
+    # -Path and the repository root can quietly redirect a "repo-internal" path outside the
+    # repo. Check every component and never follow a link. This covers the root itself and
+    # its ancestors; subdirectories inside the tree are checked during enumeration.
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$RepoRoot
+    )
+    $stop = [IO.Path]::GetFullPath($RepoRoot).TrimEnd('\', '/')
+    $p = [IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
+    while ($true) {
+        $item = Get-Item -LiteralPath $p -Force -ErrorAction Stop
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "LINK_IN_ROOT_CHAIN: '$p' is a junction/symlink; publish paths must be plain directories"
+        }
+        if ($p.Equals($stop, [StringComparison]::OrdinalIgnoreCase)) { break }
+        $parent = Split-Path -Parent $p
+        if (-not $parent -or $parent -eq $p) { break }
+        $p = $parent
+    }
+}
+
 function Resolve-PublishRoot {
     param(
         [Parameter(Mandatory)][string]$Root,
@@ -45,6 +68,7 @@ function Resolve-PublishRoot {
               $full.StartsWith($repo + '/', [StringComparison]::OrdinalIgnoreCase)
     if (-not $inside) { throw "ROOT_OUTSIDE_REPO: '$full' is not inside '$repo'" }
     if (-not (Test-Path -LiteralPath $full -PathType Container)) { throw "ROOT_NOT_FOUND: '$full' is not a directory" }
+    Assert-NoLinkChain -Path $full -RepoRoot $repo
     return $full
 }
 
@@ -102,6 +126,14 @@ function Get-PublishManifest {
     if ($prefix) { Assert-SafeRelPath $prefix }
 
     $items = New-Object System.Collections.ArrayList
+    # Directories first: a junction/symlink subdirectory (even one pointing outside the repo)
+    # must be rejected before its contents are enumerated. This is not "all links": it covers
+    # every directory and file under -Root; the root chain is checked in Resolve-PublishRoot.
+    foreach ($d in Get-ChildItem -LiteralPath $RootFull -Recurse -Force -Directory) {
+        if ($d.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "LINK_IN_TREE: '$($d.FullName)' is a junction/symlink directory (refusing: it can point outside the publish root)"
+        }
+    }
     foreach ($f in Get-ChildItem -LiteralPath $RootFull -Recurse -File) {
         if ($f.Attributes -band [IO.FileAttributes]::ReparsePoint) {
             throw "SYMLINK_IN_TREE: '$($f.FullName)' (refusing: a link can point outside the publish root)"
@@ -183,14 +215,45 @@ function Invoke-GitHub {
     return Invoke-RestMethod @p
 }
 
-function Get-GitHubFileText {
+function Get-PublishBase {
+    # Freeze the base branch once per run. The returned Sha is the only base used for the
+    # README read, base_tree and parents; a branch moving mid-run is not mixed in.
     param(
         [Parameter(Mandatory)][string]$Owner,
         [Parameter(Mandatory)][string]$Repo,
-        [Parameter(Mandatory)][string]$Path
+        [Parameter(Mandatory)][string]$BaseBranch
     )
     $H = Get-GitHubAuthHeaders
-    $resp = Invoke-GitHub -Method GET -Uri "https://api.github.com/repos/$Owner/$Repo/contents/$Path" -Headers $H
+    $base = "https://api.github.com/repos/$Owner/$Repo"
+    $ref = Invoke-GitHub -Method GET -Uri "$base/git/ref/heads/$BaseBranch" -Headers $H
+    $sha = $ref.object.sha
+    $commit = Invoke-GitHub -Method GET -Uri "$base/git/commits/$sha" -Headers $H
+    return [pscustomobject]@{ Sha = $sha; TreeSha = $commit.tree.sha }
+}
+
+function Get-GitHubContentUri {
+    param(
+        [Parameter(Mandatory)][string]$Owner,
+        [Parameter(Mandatory)][string]$Repo,
+        [Parameter(Mandatory)][string]$Path,
+        [string]$Ref
+    )
+    $uri = "https://api.github.com/repos/$Owner/$Repo/contents/$Path"
+    if ($Ref) { $uri += '?ref=' + [Uri]::EscapeDataString($Ref) }
+    return $uri
+}
+
+function Get-GitHubFileText {
+    # -Ref must be the same frozen SHA later passed to base_tree/parents; without it the API
+    # reads the repository default branch, which silently overwrites a non-default base.
+    param(
+        [Parameter(Mandatory)][string]$Owner,
+        [Parameter(Mandatory)][string]$Repo,
+        [Parameter(Mandatory)][string]$Path,
+        [string]$Ref
+    )
+    $H = Get-GitHubAuthHeaders
+    $resp = Invoke-GitHub -Method GET -Uri (Get-GitHubContentUri -Owner $Owner -Repo $Repo -Path $Path -Ref $Ref) -Headers $H
     return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($resp.content))
 }
 
@@ -208,6 +271,7 @@ function Invoke-Publish {
         [Parameter(Mandatory)][string]$CommitMessage,
         [string]$PrTitle,
         [string]$PrBody,
+        [string]$BaseSha = '',
         [switch]$Draft
     )
     $base = "https://api.github.com/repos/$Owner/$Repo"
@@ -215,10 +279,14 @@ function Invoke-Publish {
     $me = Invoke-GitHub -Method GET -Uri 'https://api.github.com/user' -Headers $H
     Write-Output "AUTH_OK login=$($me.login) target=$Owner/$Repo"
 
-    $headRef = Invoke-GitHub -Method GET -Uri "$base/git/ref/heads/$BaseBranch" -Headers $H
-    $headSha = $headRef.object.sha
+    if ($BaseSha) {
+        $headSha = $BaseSha
+    } else {
+        $headRef = Invoke-GitHub -Method GET -Uri "$base/git/ref/heads/$BaseBranch" -Headers $H
+        $headSha = $headRef.object.sha
+    }
     $headCommit = Invoke-GitHub -Method GET -Uri "$base/git/commits/$headSha" -Headers $H
-    Write-Output "BASE $BaseBranch $headSha tree=$($headCommit.tree.sha)"
+    Write-Output "BASE_FROZEN $BaseBranch $headSha tree=$($headCommit.tree.sha)"
 
     $branchExists = $false
     try {

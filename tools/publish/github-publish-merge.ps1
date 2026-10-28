@@ -63,9 +63,13 @@ if (-not $Apply) {
 
 Assert-SafeBranchName -Branch $Branch -BaseBranch $BaseBranch
 
+# Freeze the base once: the README read, base_tree and parents must all use this same SHA.
+$baseInfo = Get-PublishBase -Owner $Owner -Repo $Repo -BaseBranch $BaseBranch
+Write-Output "BASE_FROZEN $BaseBranch $($baseInfo.Sha) tree=$($baseInfo.TreeSha)"
+
 $textEntries = @()
 if (-not $NoReadmePointer) {
-    $remoteReadme = Get-GitHubFileText -Owner $Owner -Repo $Repo -Path 'README.md'
+    $remoteReadme = Get-GitHubFileText -Owner $Owner -Repo $Repo -Path 'README.md' -Ref $baseInfo.Sha
     if ($remoteReadme -match '合并版 v0\.1') {
         Write-Output 'README_POINTER_ALREADY_THERE'
     } else {
@@ -89,7 +93,7 @@ if (-not $PrBody) {
 }
 if (-not $PrTitle) { $PrTitle = $CommitMessage }
 
-Invoke-Publish -Owner $Owner -Repo $Repo -BaseBranch $BaseBranch -Branch $Branch `
+Invoke-Publish -Owner $Owner -Repo $Repo -BaseBranch $BaseBranch -BaseSha $baseInfo.Sha -Branch $Branch `
     -Items $items -TextEntries $textEntries -CommitMessage $CommitMessage `
     -PrTitle $PrTitle -PrBody $PrBody -Draft | Out-Null
 
