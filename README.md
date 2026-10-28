@@ -1,4 +1,4 @@
-> 🚀 **v2.13（2026-10-26）**：作者日常在用的那一套「手机原生 APP + 自己电脑上的分析端」已完整开源——[`安卓APP/`](安卓APP/) 是原生 Kotlin 手机端源码，[`电脑端/`](电脑端/) 是电脑端现役代码，安装包挂在 [Releases](https://github.com/hxt7198302/class-notes/releases/latest)。看这一份就能跑起来。
+> 🚀 **v2.13（2026-10-26）**：作者日常在用的那一套「手机原生 APP + 自己电脑上的分析端」已完整开源——[`安卓APP/`](安卓APP/) 是原生 Kotlin 手机端源码，[`电脑端/`](电脑端/) 是电脑端现役代码，安装包挂在 [Releases](https://github.com/shaocongzeming/class-notes/releases/latest)。看这一份就能跑起来。
 
 > 📦 **合并版 v0.1（2026-10-24）**：与 Web 版合并后的公开脱敏快照在 [`merged-v0.1/`](merged-v0.1/)，含统一 Web UI、云端后端、电脑端能力模块与安卓 WebView 壳（这是另一条产品线，不是作者日常在用的手机原生 APP）。说明见 [merged-v0.1/README.md](merged-v0.1/README.md)。
 
@@ -43,7 +43,7 @@ ACC 2026 黑客松 · 赛道一（AI + 学习）· 队伍「阿泰与朝瑞」
 把 [cloudflared.exe](https://github.com/cloudflare/cloudflared/releases) 放到本目录，双击「启动电脑端.bat」。
 首次会自动装转写引擎（几分钟，只装这一次）。
 
-**2. 手机**：装 [`classnotes-v2.13.apk`](https://github.com/hxt7198302/class-notes/releases/download/v2.13/classnotes-v2.13.apk)（约 1.1 MB，Android 8.0 及以上；sha256 见 [releases/README.md](releases/README.md)）。也可以自己从 [`安卓APP/`](安卓APP/) 构建，步骤见下。
+**2. 手机**：装 [`classnotes-v2.13.apk`](https://github.com/shaocongzeming/class-notes/releases/download/v2.13/classnotes-v2.13.apk)（约 1.1 MB，Android 8.0 及以上；sha256 见 [releases/README.md](releases/README.md)）。也可以自己从 [`安卓APP/`](安卓APP/) 构建，步骤见下。
 
 **3. 连接**（只做一次）：手机连**和电脑同一个 WiFi** → APP 点「🔗 第一次使用？点这里连接电脑」→「🔍 自动找我的电脑」。
 （首次配对必须同一局域网：配对信息走 UDP 局域网发现。配好之后人在外面也能用隧道连回家。）

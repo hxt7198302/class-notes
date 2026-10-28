@@ -5,7 +5,7 @@
 
 ## 一、直接装现成的
 
-到 [Releases](https://github.com/hxt7198302/class-notes/releases/latest) 下载 `classnotes-v2.13.apk`：
+到 [Releases](https://github.com/shaocongzeming/class-notes/releases/latest) 下载 `classnotes-v2.13.apk`：
 
 1. 手机允许「安装未知来源应用」；
 2. 装完先别急着开，**先把电脑端跑起来**（见仓库根 README「三步用起来」）；
